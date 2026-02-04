@@ -1,6 +1,6 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "iron",
+  "productName": "Iron Send",
   "version": "0.1.0",
   "identifier": "com.fcai1.iron",
   "build": {
@@ -12,9 +12,11 @@
   "app": {
     "windows": [
       {
-        "title": "iron",
-        "width": 800,
-        "height": 600
+        "title": "Iron Send",
+        "width": 400,
+        "height": 700,
+        "resizable": true,
+        "fullscreen": false
       }
     ],
     "security": {

@@ -1,160 +1,203 @@
 <script setup lang="ts">
-import { ref } from "vue";
-import { invoke } from "@tauri-apps/api/core";
+import { ref } from 'vue';
+import SendView from './components/SendView.vue';
+import ReceiveView from './components/ReceiveView.vue';
+import HistoryView from './components/HistoryView.vue';
 
-const greetMsg = ref("");
-const name = ref("");
+type TabType = 'send' | 'receive' | 'history';
 
-async function greet() {
-  // Learn more about Tauri commands at https://tauri.app/develop/calling-rust/
-  greetMsg.value = await invoke("greet", { name: name.value });
+const activeTab = ref<TabType>('send');
+
+function setTab(tab: TabType) {
+  activeTab.value = tab;
 }
 </script>
 
 <template>
-  <main class="container">
-    <h1>Welcome to Tauri + Vue</h1>
+  <div id="iron-app">
+    <!-- Header -->
+    <header class="app-header">
+      <div class="logo">
+        <span class="logo-icon">⚡</span>
+        <h1>Iron Send</h1>
+      </div>
+      <p class="tagline">Secure P2P File Transfer</p>
+    </header>
 
-    <div class="row">
-      <a href="https://vite.dev" target="_blank">
-        <img src="/vite.svg" class="logo vite" alt="Vite logo" />
-      </a>
-      <a href="https://tauri.app" target="_blank">
-        <img src="/tauri.svg" class="logo tauri" alt="Tauri logo" />
-      </a>
-      <a href="https://vuejs.org/" target="_blank">
-        <img src="./assets/vue.svg" class="logo vue" alt="Vue logo" />
-      </a>
-    </div>
-    <p>Click on the Tauri, Vite, and Vue logos to learn more.</p>
+    <!-- Tab Navigation -->
+    <nav class="tabs">
+      <button class="tab" :class="{ active: activeTab === 'send' }" @click="setTab('send')">
+        <span class="tab-icon">📤</span> Send
+      </button>
+      <button class="tab" :class="{ active: activeTab === 'receive' }" @click="setTab('receive')">
+        <span class="tab-icon">📥</span> Receive
+      </button>
+      <button class="tab" :class="{ active: activeTab === 'history' }" @click="setTab('history')">
+        <span class="tab-icon">📋</span> History
+      </button>
+    </nav>
 
-    <form class="row" @submit.prevent="greet">
-      <input id="greet-input" v-model="name" placeholder="Enter a name..." />
-      <button type="submit">Greet</button>
-    </form>
-    <p>{{ greetMsg }}</p>
-  </main>
+    <!-- Main Content -->
+    <main class="app-content">
+      <SendView v-if="activeTab === 'send'" />
+      <ReceiveView v-else-if="activeTab === 'receive'" />
+      <HistoryView v-else-if="activeTab === 'history'" />
+    </main>
+
+    <!-- Footer -->
+    <footer class="app-footer">
+      <p>Powered by <a href="https://iroh.computer" target="_blank">iroh</a></p>
+    </footer>
+  </div>
 </template>
 
-<style scoped>
-.logo.vite:hover {
-  filter: drop-shadow(0 0 2em #747bff);
-}
-
-.logo.vue:hover {
-  filter: drop-shadow(0 0 2em #249b73);
-}
-
-</style>
 <style>
-:root {
-  font-family: Inter, Avenir, Helvetica, Arial, sans-serif;
-  font-size: 16px;
-  line-height: 24px;
-  font-weight: 400;
+@import './styles/main.css';
 
-  color: #0f0f0f;
-  background-color: #f6f6f6;
-
-  font-synthesis: none;
-  text-rendering: optimizeLegibility;
-  -webkit-font-smoothing: antialiased;
-  -moz-osx-font-smoothing: grayscale;
-  -webkit-text-size-adjust: 100%;
-}
-
-.container {
-  margin: 0;
-  padding-top: 10vh;
+/* ========== App Layout ========== */
+#iron-app {
   display: flex;
   flex-direction: column;
-  justify-content: center;
+  height: 100%;
+  width: 100%;
+  max-width: 500px;
+  margin: 0 auto;
+  padding: var(--spacing-md);
+  padding-bottom: env(safe-area-inset-bottom, var(--spacing-md));
+}
+
+/* ========== Header ========== */
+.app-header {
   text-align: center;
+  padding: var(--spacing-lg) 0;
+  flex-shrink: 0;
 }
 
 .logo {
-  height: 6em;
-  padding: 1.5em;
-  will-change: filter;
-  transition: 0.75s;
-}
-
-.logo.tauri:hover {
-  filter: drop-shadow(0 0 2em #24c8db);
-}
-
-.row {
   display: flex;
+  align-items: center;
   justify-content: center;
+  gap: var(--spacing-sm);
 }
 
-a {
-  font-weight: 500;
-  color: #646cff;
-  text-decoration: inherit;
+.logo-icon {
+  font-size: 2rem;
+  background: var(--accent-gradient);
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  background-clip: text;
 }
 
-a:hover {
-  color: #535bf2;
+.logo h1 {
+  font-size: 1.5rem;
+  font-weight: 700;
+  background: var(--accent-gradient);
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  background-clip: text;
 }
 
-h1 {
-  text-align: center;
+.tagline {
+  font-size: 0.875rem;
+  color: var(--text-muted);
+  margin-top: var(--spacing-xs);
 }
 
-input,
-button {
-  border-radius: 8px;
-  border: 1px solid transparent;
-  padding: 0.6em 1.2em;
-  font-size: 1em;
-  font-weight: 500;
+/* ========== Navigation ========== */
+.tabs {
+  display: flex;
+  background: var(--bg-secondary);
+  padding: var(--spacing-xs);
+  border-radius: var(--radius-lg);
+  gap: var(--spacing-xs);
+  flex-shrink: 0;
+}
+
+.tab {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: var(--spacing-xs);
+  padding: var(--spacing-md) var(--spacing-sm);
+  background: transparent;
+  border: none;
+  border-radius: var(--radius-md);
   font-family: inherit;
-  color: #0f0f0f;
-  background-color: #ffffff;
-  transition: border-color 0.25s;
-  box-shadow: 0 2px 2px rgba(0, 0, 0, 0.2);
-}
-
-button {
+  font-size: 0.85rem;
+  font-weight: 500;
+  color: var(--text-secondary);
   cursor: pointer;
+  transition: all var(--transition-fast);
 }
 
-button:hover {
-  border-color: #396cd8;
-}
-button:active {
-  border-color: #396cd8;
-  background-color: #e8e8e8;
+.tab:hover {
+  color: var(--text-primary);
+  background: var(--bg-glass);
 }
 
-input,
-button {
-  outline: none;
+.tab.active {
+  color: white;
+  background: var(--accent-gradient);
+  box-shadow: var(--shadow-sm);
 }
 
-#greet-input {
-  margin-right: 5px;
+.tab-icon {
+  font-size: 1rem;
 }
 
-@media (prefers-color-scheme: dark) {
-  :root {
-    color: #f6f6f6;
-    background-color: #2f2f2f;
+/* ========== Main Content ========== */
+.app-content {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  margin-top: var(--spacing-md);
+}
+
+/* ========== Footer ========== */
+.app-footer {
+  flex-shrink: 0;
+  text-align: center;
+  padding: var(--spacing-md) 0;
+}
+
+.app-footer p {
+  font-size: 0.75rem;
+  color: var(--text-muted);
+}
+
+.app-footer a {
+  color: var(--accent-primary);
+  text-decoration: none;
+  font-weight: 500;
+}
+
+.app-footer a:hover {
+  text-decoration: underline;
+}
+
+/* ========== Mobile Adjustments ========== */
+@media (max-width: 400px) {
+  #iron-app {
+    padding: var(--spacing-sm);
   }
 
-  a:hover {
-    color: #24c8db;
+  .app-header {
+    padding: var(--spacing-md) 0;
   }
 
-  input,
-  button {
-    color: #ffffff;
-    background-color: #0f0f0f98;
+  .logo h1 {
+    font-size: 1.25rem;
   }
-  button:active {
-    background-color: #0f0f0f69;
+
+  .tab {
+    padding: var(--spacing-sm);
+    font-size: 0.8rem;
+  }
+
+  .tab-icon {
+    font-size: 0.9rem;
   }
 }
-
 </style>

@@ -22,4 +22,20 @@ tauri = { version = "2", features = [] }
 tauri-plugin-opener = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+tauri-plugin-fs = "2"
 
+# Iroh ecosystem for sendme functionality
+iroh = "0.34"
+iroh-blobs = { version = "0.34", features = ["rpc"] }
+
+# Async runtime and utilities
+tokio = { version = "1", features = ["full"] }
+anyhow = "1"
+tempfile = "3"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# For file metadata
+walkdir = "2"
+dirs = "5"
+rand = "0.8"
