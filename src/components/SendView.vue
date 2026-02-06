@@ -79,6 +79,7 @@
 import { ref, onMounted, onUnmounted } from 'vue';
 import { invoke } from '@tauri-apps/api/core';
 import { listen, UnlistenFn } from '@tauri-apps/api/event';
+import { open } from '@tauri-apps/plugin-dialog';
 
 interface TransferProgress {
   status: string;
@@ -123,20 +124,25 @@ onUnmounted(() => {
 
 async function selectFile() {
   try {
-    // For now, use a prompt for file path
-    // In production, you'd use a file picker dialog
-    const filePath = prompt('Enter the full path to the file or directory:');
-    if (filePath) {
-      // Get file info
-      const name = filePath.split('/').pop() || filePath;
+    // Use native file picker dialog
+    const selected = await open({
+      multiple: false,
+      directory: false,
+      title: 'Select a file to send'
+    });
+    
+    if (selected) {
+      // Get file name from path
+      const name = selected.split('/').pop() || selected.split('\\').pop() || selected;
       selectedFile.value = {
         name,
-        path: filePath,
+        path: selected,
         size: 0 // Size will be calculated on backend
       };
     }
   } catch (e) {
     console.error('File selection error:', e);
+    error.value = 'Failed to open file picker';
   }
 }
 

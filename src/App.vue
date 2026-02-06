@@ -2,9 +2,8 @@
 import { ref } from 'vue';
 import SendView from './components/SendView.vue';
 import ReceiveView from './components/ReceiveView.vue';
-import HistoryView from './components/HistoryView.vue';
 
-type TabType = 'send' | 'receive' | 'history';
+type TabType = 'send' | 'receive';
 
 const activeTab = ref<TabType>('send');
 
@@ -32,16 +31,12 @@ function setTab(tab: TabType) {
       <button class="tab" :class="{ active: activeTab === 'receive' }" @click="setTab('receive')">
         <span class="tab-icon">📥</span> Receive
       </button>
-      <button class="tab" :class="{ active: activeTab === 'history' }" @click="setTab('history')">
-        <span class="tab-icon">📋</span> History
-      </button>
     </nav>
 
     <!-- Main Content -->
     <main class="app-content">
       <SendView v-if="activeTab === 'send'" />
       <ReceiveView v-else-if="activeTab === 'receive'" />
-      <HistoryView v-else-if="activeTab === 'history'" />
     </main>
 
     <!-- Footer -->
