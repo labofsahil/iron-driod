@@ -19,16 +19,6 @@ jobs:
     runs-on: ubuntu-latest
     
     steps:
-      - name: Free Disk Space (Ubuntu)
-        uses: jlumbroso/free-disk-space@main
-        with:
-          tool-cache: false
-          android: true
-          dotnet: true
-          haskell: true
-          large-packages: true
-          docker-images: true
-          swap-storage: true
       - name: Checkout repository
         uses: actions/checkout@v4
 
@@ -37,11 +27,6 @@ jobs:
         with:
           distribution: 'temurin'
           java-version: '17'
-
-      - name: Fix Android SDK permissions
-        run: |
-          sudo mkdir -p /usr/local/lib/android
-          sudo chown -R $USER:$USER /usr/local/lib/android
 
       - name: Setup Android SDK
         uses: android-actions/setup-android@v3
@@ -93,16 +78,6 @@ jobs:
     if: github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master')
     
     steps:
-      - name: Free Disk Space (Ubuntu)
-        uses: jlumbroso/free-disk-space@main
-        with:
-          tool-cache: false
-          android: true
-          dotnet: true
-          haskell: true
-          large-packages: true
-          docker-images: true
-          swap-storage: true
       - name: Checkout repository
         uses: actions/checkout@v4
 
@@ -111,11 +86,6 @@ jobs:
         with:
           distribution: 'temurin'
           java-version: '17'
-
-      - name: Fix Android SDK permissions
-        run: |
-          sudo mkdir -p /usr/local/lib/android
-          sudo chown -R $USER:$USER /usr/local/lib/android
 
       - name: Setup Android SDK
         uses: android-actions/setup-android@v3
