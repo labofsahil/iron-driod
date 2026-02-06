@@ -16,7 +16,7 @@ env:
 
 jobs:
   build-android:
-    runs-on: ubuntu-latest
+    runs-on: blacksmith-4vcpu-ubuntu-2404
     
     steps:
       - name: Checkout repository
@@ -74,7 +74,7 @@ jobs:
           retention-days: 7
 
   build-android-release:
-    runs-on: ubuntu-latest
+    runs-on: blacksmith-4vcpu-ubuntu-2404
     if: github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master')
     
     steps:
