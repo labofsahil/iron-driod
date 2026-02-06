@@ -38,6 +38,11 @@ jobs:
           distribution: 'temurin'
           java-version: '17'
 
+      - name: Fix Android SDK permissions
+        run: |
+          sudo mkdir -p /usr/local/lib/android
+          sudo chown -R $USER:$USER /usr/local/lib/android
+
       - name: Setup Android SDK
         uses: android-actions/setup-android@v3
 
@@ -106,6 +111,11 @@ jobs:
         with:
           distribution: 'temurin'
           java-version: '17'
+
+      - name: Fix Android SDK permissions
+        run: |
+          sudo mkdir -p /usr/local/lib/android
+          sudo chown -R $USER:$USER /usr/local/lib/android
 
       - name: Setup Android SDK
         uses: android-actions/setup-android@v3
