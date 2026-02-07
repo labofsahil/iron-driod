@@ -12,18 +12,33 @@ use tauri::State;
 fn init_tracing() {
     use tracing_subscriber::{fmt, EnvFilter};
     let filter = EnvFilter::try_from_default_env()
-        .unwrap_or_else(|_| EnvFilter::new("info"));
+        .unwrap_or_else(|_| EnvFilter::new("debug,iroh=info,iroh_blobs=info"));
     fmt().with_env_filter(filter).init();
 }
 
-/// Tauri command: Start sending a file or directory
+/// Tauri command: Start sending a file or directory (by path)
 #[tauri::command]
 async fn start_send(
     path: String,
     state: State<'_, Arc<SendmeState>>,
     app: tauri::AppHandle,
 ) -> Result<SendResult, String> {
+    tracing::info!("start_send command called with path: {}", path);
     sendme::start_send(&state, path, app)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+/// Tauri command: Start sending from raw bytes (for Android content:// URIs)
+#[tauri::command]
+async fn start_send_bytes(
+    file_name: String,
+    data: Vec<u8>,
+    state: State<'_, Arc<SendmeState>>,
+    app: tauri::AppHandle,
+) -> Result<SendResult, String> {
+    tracing::info!("start_send_bytes command called - file: {}, size: {} bytes", file_name, data.len());
+    sendme::start_send_bytes(&state, file_name, data, app)
         .await
         .map_err(|e| e.to_string())
 }
@@ -43,6 +58,7 @@ async fn receive_file(
     output_dir: String,
     app: tauri::AppHandle,
 ) -> Result<ReceiveResult, String> {
+    tracing::info!("receive_file command called");
     sendme::receive_file(ticket, output_dir, app)
         .await
         .map_err(|e| e.to_string())
@@ -91,6 +107,7 @@ pub fn run() {
         .manage(sendme_state)
         .invoke_handler(tauri::generate_handler![
             start_send,
+            start_send_bytes,
             cancel_send,
             receive_file,
             get_downloads_dir
@@ -98,3 +115,4 @@ pub fn run() {
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }
+

@@ -80,6 +80,7 @@ import { ref, onMounted, onUnmounted } from 'vue';
 import { invoke } from '@tauri-apps/api/core';
 import { listen, UnlistenFn } from '@tauri-apps/api/event';
 import { open } from '@tauri-apps/plugin-dialog';
+import { readFile } from '@tauri-apps/plugin-fs';
 
 interface TransferProgress {
   status: string;
@@ -94,7 +95,7 @@ interface SendResult {
   file_size: number;
 }
 
-const selectedFile = ref<{ name: string; path: string; size: number } | null>(null);
+const selectedFile = ref<{ name: string; path: string; size: number; data?: Uint8Array } | null>(null);
 const isDragging = ref(false);
 const isTransferring = ref(false);
 const ticket = ref<string | null>(null);
@@ -132,13 +133,31 @@ async function selectFile() {
     });
     
     if (selected) {
+      console.log('Selected file path:', selected);
       // Get file name from path
       const name = selected.split('/').pop() || selected.split('\\').pop() || selected;
-      selectedFile.value = {
-        name,
-        path: selected,
-        size: 0 // Size will be calculated on backend
-      };
+      
+      // Try to read the file content immediately
+      // This works for both regular paths and content:// URIs on Android
+      try {
+        console.log('Reading file content...');
+        const data = await readFile(selected);
+        console.log('File read successfully, size:', data.length);
+        selectedFile.value = {
+          name,
+          path: selected,
+          size: data.length,
+          data: data
+        };
+      } catch (readErr) {
+        console.error('Failed to read file, will try path-based send:', readErr);
+        // Fallback: store without data, will try path-based send
+        selectedFile.value = {
+          name,
+          path: selected,
+          size: 0
+        };
+      }
     }
   } catch (e) {
     console.error('File selection error:', e);
@@ -169,9 +188,22 @@ async function startSend() {
   error.value = null;
 
   try {
-    const result = await invoke<SendResult>('start_send', {
-      path: selectedFile.value.path
-    });
+    let result: SendResult;
+    
+    if (selectedFile.value.data) {
+      // Use bytes-based send (works with Android content:// URIs)
+      console.log('Using start_send_bytes with', selectedFile.value.data.length, 'bytes');
+      result = await invoke<SendResult>('start_send_bytes', {
+        fileName: selectedFile.value.name,
+        data: Array.from(selectedFile.value.data) // Convert Uint8Array to array for serialization
+      });
+    } else {
+      // Fallback to path-based send
+      console.log('Using start_send with path:', selectedFile.value.path);
+      result = await invoke<SendResult>('start_send', {
+        path: selectedFile.value.path
+      });
+    }
 
     ticket.value = result.ticket;
     selectedFile.value = {
@@ -180,6 +212,7 @@ async function startSend() {
     };
     isTransferring.value = false;
   } catch (e) {
+    console.error('Send error:', e);
     error.value = String(e);
     isTransferring.value = false;
   }
