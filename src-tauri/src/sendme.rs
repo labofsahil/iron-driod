@@ -7,6 +7,8 @@ use anyhow::{anyhow, Context, Result};
 use iroh::{protocol::Router, Endpoint, RelayMode, SecretKey};
 use iroh_blobs::{
     api::downloader::Downloader,
+    format::collection::Collection,
+    protocol::GetRequest,
     store::fs::FsStore,
     ticket::BlobTicket,
     BlobFormat,
@@ -470,10 +472,11 @@ pub async fn receive_file(
         percent: 20.0,
     });
 
-    // Get hash and node address from ticket
+    // Get hash, format, and node address from ticket
     let hash = ticket.hash();
+    let format = ticket.format();
     let (node_addr, _, _) = ticket.into_parts();
-    info!("Attempting to download from node: {:?}", node_addr);
+    info!("Attempting to download from node: {:?}, format: {:?}", node_addr, format);
 
     // Use the client to download
     let client = store.blobs();
@@ -486,65 +489,118 @@ pub async fn receive_file(
         percent: 30.0,
     });
 
-    // Start the download using Downloader
+    // Start the download using Downloader with proper request based on format
     info!("Starting download...");
     let downloader = Downloader::new(&store, router.endpoint());
-    let _download = downloader.download(hash, [node_addr.id]).await?;
-    info!("Download started, waiting for completion...");
     
-    // Emit progress during download
-    let _ = app.emit("transfer-progress", TransferProgress {
-        status: "Transferring data...".to_string(),
-        bytes_transferred: 0,
-        total_bytes: 0,
-        percent: 50.0,
-    });
-
-    // Download is complete at this point
+    // Create the appropriate request based on blob format
+    let request = match format {
+        BlobFormat::Raw => GetRequest::blob(hash),
+        BlobFormat::HashSeq => GetRequest::all(hash),
+    };
+    
+    // Start the download and await its completion
+    let download_progress = downloader.download(request, [node_addr.id]);
+    download_progress.await.context("Download failed")?;
     info!("Download complete!");
 
-    // Emit progress
-    let _ = app.emit("transfer-progress", TransferProgress {
-        status: "Saving file...".to_string(),
-        bytes_transferred: 0,
-        total_bytes: 0,
-        percent: 80.0,
-    });
-
-    // Generate output filename based on hash
-    let file_name = format!("received_{}", &hash.to_string()[..8]);
-    let final_path = output_path.join(&file_name);
-    info!("Exporting to: {:?}", final_path);
-
-    // Export the blob to a file
-    info!("Starting export...");
-    client
-        .export(hash, &final_path)
-        .await
-        .context("Failed to export blob")?;
-    info!("Export complete!");
-
-    let file_size = std::fs::metadata(&final_path)
-        .map(|m| m.len())
-        .unwrap_or(0);
-    info!("Final file size: {} bytes", file_size);
-
-    // Emit complete
-    let _ = app.emit("transfer-progress", TransferProgress {
-        status: "Complete".to_string(),
-        bytes_transferred: file_size,
-        total_bytes: file_size,
-        percent: 100.0,
-    });
-
-    // Cleanup - shutdown router first
-    info!("Shutting down router...");
-    router.shutdown().await?;
-    info!("Receive complete!");
-
-    Ok(ReceiveResult {
-        file_path: final_path.to_string_lossy().to_string(),
-        file_name,
-        file_size,
-    })
+    // Export files based on format
+    match format {
+        BlobFormat::HashSeq => {
+            // For HashSeq (collection), load the collection manifest to get filenames
+            info!("Loading collection manifest...");
+            // Use store as reference - FsStore implements Deref to Store which implements SimpleStore
+            let collection = Collection::load(hash, store.as_ref())
+                .await
+                .context("Failed to load collection")?;
+            
+            info!("Collection has {} files", collection.len());
+            
+            // Export each file in the collection
+            let mut total_size = 0u64;
+            let mut file_names = Vec::new();
+            for (name, blob_hash) in collection.iter() {
+                info!("Exporting: {} (hash: {})", name, blob_hash);
+                let file_path = output_path.join(name);
+                
+                // Create parent directories if needed
+                if let Some(parent) = file_path.parent() {
+                    std::fs::create_dir_all(parent).ok();
+                }
+                
+                client
+                    .export(*blob_hash, &file_path)
+                    .await
+                    .with_context(|| format!("Failed to export: {}", name))?;
+                
+                let size = std::fs::metadata(&file_path).map(|m| m.len()).unwrap_or(0);
+                total_size += size;
+                file_names.push(name.to_string());
+            }
+            
+            info!("Export complete! Total size: {} bytes", total_size);
+            
+            // Get the first filename for the result
+            let file_name = file_names.first().cloned().unwrap_or_else(|| format!("received_{}", &hash.to_string()[..8]));
+            let final_path = if file_names.len() == 1 {
+                output_path.join(&file_name)
+            } else {
+                output_path.to_path_buf()
+            };
+            
+            // Emit complete
+            let _ = app.emit("transfer-progress", TransferProgress {
+                status: "Complete".to_string(),
+                bytes_transferred: total_size,
+                total_bytes: total_size,
+                percent: 100.0,
+            });
+            
+            // Cleanup - shutdown router
+            info!("Shutting down router...");
+            router.shutdown().await?;
+            info!("Receive complete!");
+            
+            Ok(ReceiveResult {
+                file_path: final_path.to_string_lossy().to_string(),
+                file_name,
+                file_size: total_size,
+            })
+        }
+        BlobFormat::Raw => {
+            // For raw blobs, use hash-based name
+            let file_name = format!("received_{}", &hash.to_string()[..8]);
+            let final_path = output_path.join(&file_name);
+            info!("Exporting to: {:?}", final_path);
+            
+            client
+                .export(hash, &final_path)
+                .await
+                .context("Failed to export blob")?;
+            
+            let file_size = std::fs::metadata(&final_path)
+                .map(|m| m.len())
+                .unwrap_or(0);
+            info!("Export complete! File size: {} bytes", file_size);
+            
+            // Emit complete
+            let _ = app.emit("transfer-progress", TransferProgress {
+                status: "Complete".to_string(),
+                bytes_transferred: file_size,
+                total_bytes: file_size,
+                percent: 100.0,
+            });
+            
+            // Cleanup - shutdown router
+            info!("Shutting down router...");
+            router.shutdown().await?;
+            info!("Receive complete!");
+            
+            Ok(ReceiveResult {
+                file_path: final_path.to_string_lossy().to_string(),
+                file_name,
+                file_size,
+            })
+        }
+    }
 }
