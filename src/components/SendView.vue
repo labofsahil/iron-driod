@@ -35,7 +35,6 @@
               v-model="item.name"
               class="name-input"
               :placeholder="'Enter filename ' + (index + 1) + ' (e.g., photo.jpg)'"
-              :ref="el => { if (index === 0) firstInput = el }"
             />
             <h3 v-else @click="editFileName(index)">{{ item.name }}</h3>
             <p class="text-muted">{{ formatFileSize(item.size) }}</p>
@@ -155,7 +154,6 @@ const progress = ref<TransferProgress>({
 });
 const showNameInput = ref(false);
 const customFileName = ref('');
-const firstInput = ref<HTMLInputElement | null>(null);
 
 // Detect if running on Android
 const isAndroid = /android/i.test(navigator.userAgent);
