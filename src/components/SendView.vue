@@ -19,17 +19,23 @@
 
     <!-- Selected Files/Folder Info -->
     <div v-else class="card animate-slideUp">
+      <!-- Android Naming Notice -->
+      <div v-if="isAndroid && needsNaming" class="naming-notice">
+        <span class="notice-icon">✏️</span>
+        <p>Please enter the correct filename(s) with extension</p>
+      </div>
+      
       <div class="file-list">
         <div v-for="(item, index) in selectedItems" :key="index" class="file-info">
           <div class="file-icon">{{ item.isDir ? '📁' : '📄' }}</div>
           <div class="file-details">
+            <!-- Always show input for files that need naming -->
             <input 
-              v-if="showNameInput && index === 0"
-              v-model="customFileName"
+              v-if="item.needsName || (showNameInput && index === 0)"
+              v-model="item.name"
               class="name-input"
-              placeholder="Enter filename"
-              @blur="applyCustomName"
-              @keyup.enter="applyCustomName"
+              :placeholder="'Enter filename ' + (index + 1) + ' (e.g., photo.jpg)'"
+              :ref="el => { if (index === 0) firstInput = el }"
             />
             <h3 v-else @click="editFileName(index)">{{ item.name }}</h3>
             <p class="text-muted">{{ formatFileSize(item.size) }}</p>
@@ -42,14 +48,10 @@
         </div>
       </div>
       
-      <!-- Name Input Help Text -->
-      <p v-if="showNameInput" class="text-muted text-small mt-sm">
-        📝 Tip: Tap the filename to edit it with the correct extension (e.g., photo.jpg)
-      </p>
-      
       <button class="btn btn-secondary btn-icon clear-btn" @click="clearSelection" title="Remove All">
         ✕ Clear
       </button>
+
 
       <!-- Progress Bar (during transfer) -->
       <div v-if="isTransferring" class="progress-container mt-lg">
@@ -135,6 +137,7 @@ interface SelectedItem {
   path: string;
   size: number;
   isDir: boolean;
+  needsName?: boolean;
   data?: Uint8Array;
 }
 
@@ -152,9 +155,13 @@ const progress = ref<TransferProgress>({
 });
 const showNameInput = ref(false);
 const customFileName = ref('');
+const firstInput = ref<HTMLInputElement | null>(null);
 
 // Detect if running on Android
 const isAndroid = /android/i.test(navigator.userAgent);
+
+// Check if any files need naming
+const needsNaming = computed(() => selectedItems.value.some(item => item.needsName));
 
 const totalSize = computed(() => selectedItems.value.reduce((sum, item) => sum + item.size, 0));
 
@@ -270,17 +277,17 @@ async function selectFolder() {
 
 async function processSelectedPaths(paths: string[], isDir: boolean) {
   const items: SelectedItem[] = [];
-  let needsNamePrompt = false;
   
-  for (const filePath of paths) {
+  for (let i = 0; i < paths.length; i++) {
+    const filePath = paths[i];
     let name = extractFileName(filePath);
+    let needsName = false;
     
-    // If we couldn't extract a name (Android content URI), mark for prompt
+    // If we couldn't extract a name (Android content URI), mark for manual input
     if (!name) {
-      // Generate a temporary name based on timestamp and index
-      const timestamp = new Date().toISOString().slice(11, 19).replace(/:/g, '');
-      name = `file_${timestamp}_${items.length + 1}`;
-      needsNamePrompt = true;
+      // Use a friendly placeholder that indicates they need to enter the name
+      name = `File ${i + 1}`;
+      needsName = true;
     }
     
     try {
@@ -292,6 +299,7 @@ async function processSelectedPaths(paths: string[], isDir: boolean) {
         path: filePath,
         size: data.length,
         isDir: false,
+        needsName,
         data: data
       });
     } catch (readErr) {
@@ -301,18 +309,13 @@ async function processSelectedPaths(paths: string[], isDir: boolean) {
         name,
         path: filePath,
         size: 0,
-        isDir: isDir
+        isDir: isDir,
+        needsName
       });
     }
   }
   
   selectedItems.value = items;
-  
-  // If any file needs a name, show the name input dialog
-  if (needsNamePrompt && items.length === 1) {
-    showNameInput.value = true;
-    customFileName.value = items[0].name;
-  }
 }
 
 function handleDrop(event: DragEvent) {
@@ -550,5 +553,26 @@ function formatFileSize(bytes: number): string {
 
 .text-small {
   font-size: 0.8rem;
+}
+
+.naming-notice {
+  display: flex;
+  align-items: center;
+  gap: var(--spacing-sm);
+  padding: var(--spacing-md);
+  margin-bottom: var(--spacing-md);
+  background: linear-gradient(135deg, rgba(255, 193, 7, 0.1), rgba(255, 152, 0, 0.1));
+  border: 1px solid rgba(255, 193, 7, 0.3);
+  border-radius: var(--radius-md);
+}
+
+.naming-notice .notice-icon {
+  font-size: 1.5rem;
+}
+
+.naming-notice p {
+  margin: 0;
+  font-size: 0.85rem;
+  color: var(--text-primary);
 }
 </style>
