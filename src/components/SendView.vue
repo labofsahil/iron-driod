@@ -4,14 +4,14 @@
     <div v-if="!selectedItems.length" class="dropzone" @dragover.prevent="isDragging = true"
       @dragleave="isDragging = false" @drop.prevent="handleDrop" :class="{ active: isDragging }">
       <div class="dropzone-icon">📁</div>
-      <h2>Select Files or Folder</h2>
-      <p class="text-muted">Choose files or a folder to share</p>
+      <h2>Select Files{{ isAndroid ? '' : ' or Folder' }}</h2>
+      <p class="text-muted">{{ isAndroid ? 'Choose files to share' : 'Choose files or a folder to share' }}</p>
       
       <div class="selection-buttons mt-lg">
         <button class="btn btn-secondary" @click="selectFiles">
           <span>📄</span> Select Files
         </button>
-        <button class="btn btn-secondary" @click="selectFolder">
+        <button v-if="!isAndroid" class="btn btn-secondary" @click="selectFolder">
           <span>📁</span> Select Folder
         </button>
       </div>
@@ -23,7 +23,15 @@
         <div v-for="(item, index) in selectedItems" :key="index" class="file-info">
           <div class="file-icon">{{ item.isDir ? '📁' : '📄' }}</div>
           <div class="file-details">
-            <h3>{{ item.name }}</h3>
+            <input 
+              v-if="showNameInput && index === 0"
+              v-model="customFileName"
+              class="name-input"
+              placeholder="Enter filename"
+              @blur="applyCustomName"
+              @keyup.enter="applyCustomName"
+            />
+            <h3 v-else @click="editFileName(index)">{{ item.name }}</h3>
             <p class="text-muted">{{ formatFileSize(item.size) }}</p>
           </div>
         </div>
@@ -33,6 +41,11 @@
           <span class="text-muted">{{ formatFileSize(totalSize) }} total</span>
         </div>
       </div>
+      
+      <!-- Name Input Help Text -->
+      <p v-if="showNameInput" class="text-muted text-small mt-sm">
+        📝 Tip: Tap the filename to edit it with the correct extension (e.g., photo.jpg)
+      </p>
       
       <button class="btn btn-secondary btn-icon clear-btn" @click="clearSelection" title="Remove All">
         ✕ Clear
@@ -50,8 +63,13 @@
       </div>
 
       <!-- Send Button -->
-      <button v-if="!ticket && !isTransferring" class="btn btn-primary btn-large w-full mt-lg" @click="startSend">
+      <button v-if="!ticket && !isTransferring && !showNameInput" class="btn btn-primary btn-large w-full mt-lg" @click="startSend">
         <span>🚀</span> Start Sharing
+      </button>
+      
+      <!-- Confirm Name Button -->
+      <button v-if="showNameInput" class="btn btn-primary btn-large w-full mt-lg" @click="applyCustomName">
+        <span>✓</span> Confirm Name & Share
       </button>
     </div>
 
@@ -132,6 +150,11 @@ const progress = ref<TransferProgress>({
   total_bytes: 0,
   percent: 0
 });
+const showNameInput = ref(false);
+const customFileName = ref('');
+
+// Detect if running on Android
+const isAndroid = /android/i.test(navigator.userAgent);
 
 const totalSize = computed(() => selectedItems.value.reduce((sum, item) => sum + item.size, 0));
 
@@ -149,6 +172,49 @@ onUnmounted(() => {
     unlisten();
   }
 });
+
+/**
+ * Extract a human-readable filename from a path or content URI
+ */
+function extractFileName(filePath: string): string {
+  // Decode URL-encoded characters
+  let decoded = filePath;
+  try {
+    decoded = decodeURIComponent(filePath);
+  } catch {
+    // If decoding fails, use as-is
+  }
+  
+  // Check if this is an Android content URI
+  if (decoded.startsWith('content://')) {
+    // Try to extract a meaningful name from the URI
+    // Common patterns: 
+    // - content://media/external/file/1234 -> use the file ID
+    // - content://com.android.providers.downloads.documents/document/raw%3A%2Fstorage%2F... -> extract filename
+    
+    // Check for document ID pattern with path
+    const rawPathMatch = decoded.match(/raw:([^&]+)/);
+    if (rawPathMatch) {
+      const rawPath = rawPathMatch[1];
+      const name = rawPath.split('/').pop();
+      if (name) return name;
+    }
+    
+    // Check for display name in query params (some content providers include it)
+    const displayNameMatch = decoded.match(/displayName=([^&]+)/);
+    if (displayNameMatch) {
+      return displayNameMatch[1];
+    }
+    
+    // For mediastore URIs, generate a name with extension based on mime type
+    // Since we can't get the real name, prompt user or use a generic name
+    return '';  // Return empty to trigger manual name input
+  }
+  
+  // Regular file path - extract filename
+  const parts = decoded.split(/[/\\]/);
+  return parts[parts.length - 1] || decoded;
+}
 
 async function selectFiles() {
   try {
@@ -170,6 +236,12 @@ async function selectFiles() {
 }
 
 async function selectFolder() {
+  // Folder selection is not well-supported on Android
+  if (isAndroid) {
+    error.value = 'Folder selection is not supported on Android. Please select individual files.';
+    return;
+  }
+  
   try {
     // Use native folder picker dialog
     const selected = await open({
@@ -180,7 +252,7 @@ async function selectFolder() {
     
     if (selected) {
       const folderPath = Array.isArray(selected) ? selected[0] : selected;
-      const name = folderPath.split('/').pop() || folderPath.split('\\').pop() || folderPath;
+      const name = extractFileName(folderPath) || 'folder';
       
       // For folders, we don't read the data here - the backend handles it
       selectedItems.value = [{
@@ -192,15 +264,24 @@ async function selectFolder() {
     }
   } catch (e) {
     console.error('Folder selection error:', e);
-    error.value = 'Failed to open folder picker';
+    error.value = 'Failed to open folder picker. This may not be supported on your device.';
   }
 }
 
 async function processSelectedPaths(paths: string[], isDir: boolean) {
   const items: SelectedItem[] = [];
+  let needsNamePrompt = false;
   
   for (const filePath of paths) {
-    const name = filePath.split('/').pop() || filePath.split('\\').pop() || filePath;
+    let name = extractFileName(filePath);
+    
+    // If we couldn't extract a name (Android content URI), mark for prompt
+    if (!name) {
+      // Generate a temporary name based on timestamp and index
+      const timestamp = new Date().toISOString().slice(11, 19).replace(/:/g, '');
+      name = `file_${timestamp}_${items.length + 1}`;
+      needsNamePrompt = true;
+    }
     
     try {
       console.log('Reading file:', filePath);
@@ -226,6 +307,12 @@ async function processSelectedPaths(paths: string[], isDir: boolean) {
   }
   
   selectedItems.value = items;
+  
+  // If any file needs a name, show the name input dialog
+  if (needsNamePrompt && items.length === 1) {
+    showNameInput.value = true;
+    customFileName.value = items[0].name;
+  }
 }
 
 function handleDrop(event: DragEvent) {
@@ -241,6 +328,24 @@ function clearSelection() {
   selectedItems.value = [];
   ticket.value = null;
   error.value = null;
+  showNameInput.value = false;
+  customFileName.value = '';
+}
+
+function editFileName(index: number) {
+  if (index === 0 && selectedItems.value.length === 1) {
+    customFileName.value = selectedItems.value[0].name;
+    showNameInput.value = true;
+  }
+}
+
+function applyCustomName() {
+  if (customFileName.value.trim() && selectedItems.value.length > 0) {
+    selectedItems.value[0].name = customFileName.value.trim();
+  }
+  showNameInput.value = false;
+  // Auto-start send after confirming the name
+  startSend();
 }
 
 async function startSend() {
@@ -417,5 +522,33 @@ function formatFileSize(bytes: number): string {
 .clear-btn {
   width: 100%;
   margin-bottom: var(--spacing-md);
+}
+
+.name-input {
+  width: 100%;
+  padding: var(--spacing-sm);
+  font-size: 0.9rem;
+  border: 1px solid var(--accent-primary);
+  border-radius: var(--radius-sm);
+  background: var(--bg-secondary);
+  color: var(--text-primary);
+}
+
+.name-input:focus {
+  outline: none;
+  border-color: var(--accent-secondary);
+  box-shadow: 0 0 0 2px rgba(var(--accent-primary-rgb), 0.2);
+}
+
+.file-details h3 {
+  cursor: pointer;
+}
+
+.file-details h3:hover {
+  color: var(--accent-primary);
+}
+
+.text-small {
+  font-size: 0.8rem;
 }
 </style>
