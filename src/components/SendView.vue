@@ -1,25 +1,42 @@
 <template>
   <div class="send-view animate-fadeIn">
     <!-- File Selection Area -->
-    <div v-if="!selectedFile" class="dropzone" @click="selectFile" @dragover.prevent="isDragging = true"
+    <div v-if="!selectedItems.length" class="dropzone" @dragover.prevent="isDragging = true"
       @dragleave="isDragging = false" @drop.prevent="handleDrop" :class="{ active: isDragging }">
       <div class="dropzone-icon">📁</div>
-      <h2>Select a File</h2>
-      <p class="text-muted">Click to browse or drag & drop</p>
-    </div>
-
-    <!-- Selected File Info -->
-    <div v-else class="card animate-slideUp">
-      <div class="file-info">
-        <div class="file-icon">📄</div>
-        <div class="file-details">
-          <h3>{{ selectedFile.name }}</h3>
-          <p class="text-muted">{{ formatFileSize(selectedFile.size) }}</p>
-        </div>
-        <button class="btn btn-secondary btn-icon" @click="clearSelection" title="Remove">
-          ✕
+      <h2>Select Files or Folder</h2>
+      <p class="text-muted">Choose files or a folder to share</p>
+      
+      <div class="selection-buttons mt-lg">
+        <button class="btn btn-secondary" @click="selectFiles">
+          <span>📄</span> Select Files
+        </button>
+        <button class="btn btn-secondary" @click="selectFolder">
+          <span>📁</span> Select Folder
         </button>
       </div>
+    </div>
+
+    <!-- Selected Files/Folder Info -->
+    <div v-else class="card animate-slideUp">
+      <div class="file-list">
+        <div v-for="(item, index) in selectedItems" :key="index" class="file-info">
+          <div class="file-icon">{{ item.isDir ? '📁' : '📄' }}</div>
+          <div class="file-details">
+            <h3>{{ item.name }}</h3>
+            <p class="text-muted">{{ formatFileSize(item.size) }}</p>
+          </div>
+        </div>
+        
+        <div v-if="selectedItems.length > 1" class="total-info">
+          <strong>{{ selectedItems.length }} items</strong>
+          <span class="text-muted">{{ formatFileSize(totalSize) }} total</span>
+        </div>
+      </div>
+      
+      <button class="btn btn-secondary btn-icon clear-btn" @click="clearSelection" title="Remove All">
+        ✕ Clear
+      </button>
 
       <!-- Progress Bar (during transfer) -->
       <div v-if="isTransferring" class="progress-container mt-lg">
@@ -76,7 +93,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref, onMounted, onUnmounted } from 'vue';
+import { ref, computed, onMounted, onUnmounted } from 'vue';
 import { invoke } from '@tauri-apps/api/core';
 import { listen, UnlistenFn } from '@tauri-apps/api/event';
 import { open } from '@tauri-apps/plugin-dialog';
@@ -95,7 +112,15 @@ interface SendResult {
   file_size: number;
 }
 
-const selectedFile = ref<{ name: string; path: string; size: number; data?: Uint8Array } | null>(null);
+interface SelectedItem {
+  name: string;
+  path: string;
+  size: number;
+  isDir: boolean;
+  data?: Uint8Array;
+}
+
+const selectedItems = ref<SelectedItem[]>([]);
 const isDragging = ref(false);
 const isTransferring = ref(false);
 const ticket = ref<string | null>(null);
@@ -107,6 +132,8 @@ const progress = ref<TransferProgress>({
   total_bytes: 0,
   percent: 0
 });
+
+const totalSize = computed(() => selectedItems.value.reduce((sum, item) => sum + item.size, 0));
 
 let unlisten: UnlistenFn | null = null;
 
@@ -123,41 +150,18 @@ onUnmounted(() => {
   }
 });
 
-async function selectFile() {
+async function selectFiles() {
   try {
-    // Use native file picker dialog
+    // Use native file picker dialog with multiple file support
     const selected = await open({
-      multiple: false,
+      multiple: true,
       directory: false,
-      title: 'Select a file to send'
+      title: 'Select files to send'
     });
     
     if (selected) {
-      console.log('Selected file path:', selected);
-      // Get file name from path
-      const name = selected.split('/').pop() || selected.split('\\').pop() || selected;
-      
-      // Try to read the file content immediately
-      // This works for both regular paths and content:// URIs on Android
-      try {
-        console.log('Reading file content...');
-        const data = await readFile(selected);
-        console.log('File read successfully, size:', data.length);
-        selectedFile.value = {
-          name,
-          path: selected,
-          size: data.length,
-          data: data
-        };
-      } catch (readErr) {
-        console.error('Failed to read file, will try path-based send:', readErr);
-        // Fallback: store without data, will try path-based send
-        selectedFile.value = {
-          name,
-          path: selected,
-          size: 0
-        };
-      }
+      const paths = Array.isArray(selected) ? selected : [selected];
+      await processSelectedPaths(paths, false);
     }
   } catch (e) {
     console.error('File selection error:', e);
@@ -165,51 +169,127 @@ async function selectFile() {
   }
 }
 
+async function selectFolder() {
+  try {
+    // Use native folder picker dialog
+    const selected = await open({
+      multiple: false,
+      directory: true,
+      title: 'Select a folder to send'
+    });
+    
+    if (selected) {
+      const folderPath = Array.isArray(selected) ? selected[0] : selected;
+      const name = folderPath.split('/').pop() || folderPath.split('\\').pop() || folderPath;
+      
+      // For folders, we don't read the data here - the backend handles it
+      selectedItems.value = [{
+        name,
+        path: folderPath,
+        size: 0, // Will be calculated by backend
+        isDir: true
+      }];
+    }
+  } catch (e) {
+    console.error('Folder selection error:', e);
+    error.value = 'Failed to open folder picker';
+  }
+}
+
+async function processSelectedPaths(paths: string[], isDir: boolean) {
+  const items: SelectedItem[] = [];
+  
+  for (const filePath of paths) {
+    const name = filePath.split('/').pop() || filePath.split('\\').pop() || filePath;
+    
+    try {
+      console.log('Reading file:', filePath);
+      const data = await readFile(filePath);
+      console.log('File read successfully, size:', data.length);
+      items.push({
+        name,
+        path: filePath,
+        size: data.length,
+        isDir: false,
+        data: data
+      });
+    } catch (readErr) {
+      console.error('Failed to read file:', readErr);
+      // Fallback: store without data
+      items.push({
+        name,
+        path: filePath,
+        size: 0,
+        isDir: isDir
+      });
+    }
+  }
+  
+  selectedItems.value = items;
+}
+
 function handleDrop(event: DragEvent) {
   isDragging.value = false;
   // Handle dropped files - requires additional Tauri setup for mobile
   const files = event.dataTransfer?.files;
   if (files && files.length > 0) {
-    // This would need native path resolution
     console.log('Dropped files:', files);
   }
 }
 
 function clearSelection() {
-  selectedFile.value = null;
+  selectedItems.value = [];
   ticket.value = null;
   error.value = null;
 }
 
 async function startSend() {
-  if (!selectedFile.value) return;
+  if (!selectedItems.value.length) return;
 
   isTransferring.value = true;
   error.value = null;
 
   try {
     let result: SendResult;
+    const firstItem = selectedItems.value[0];
     
-    if (selectedFile.value.data) {
-      // Use bytes-based send (works with Android content:// URIs)
-      console.log('Using start_send_bytes with', selectedFile.value.data.length, 'bytes');
+    // Check if this is a folder or if we have multiple items
+    if (firstItem.isDir) {
+      // Folder: use path-based send
+      console.log('Sending folder:', firstItem.path);
+      result = await invoke<SendResult>('start_send', {
+        path: firstItem.path
+      });
+    } else if (selectedItems.value.length === 1 && firstItem.data) {
+      // Single file with data: use bytes-based send
+      console.log('Using start_send_bytes with', firstItem.data.length, 'bytes');
       result = await invoke<SendResult>('start_send_bytes', {
-        fileName: selectedFile.value.name,
-        data: Array.from(selectedFile.value.data) // Convert Uint8Array to array for serialization
+        fileName: firstItem.name,
+        data: Array.from(firstItem.data)
+      });
+    } else if (selectedItems.value.length === 1) {
+      // Single file without data: use path-based send
+      console.log('Using start_send with path:', firstItem.path);
+      result = await invoke<SendResult>('start_send', {
+        path: firstItem.path
       });
     } else {
-      // Fallback to path-based send
-      console.log('Using start_send with path:', selectedFile.value.path);
-      result = await invoke<SendResult>('start_send', {
-        path: selectedFile.value.path
-      });
+      // Multiple files: need to send paths array
+      // For now, send first file - TODO: implement multi-file send command
+      console.log('Multiple files - sending first file:', firstItem.path);
+      if (firstItem.data) {
+        result = await invoke<SendResult>('start_send_bytes', {
+          fileName: firstItem.name,
+          data: Array.from(firstItem.data)
+        });
+      } else {
+        result = await invoke<SendResult>('start_send', {
+          path: firstItem.path
+        });
+      }
     }
 
     ticket.value = result.ticket;
-    selectedFile.value = {
-      ...selectedFile.value,
-      size: result.file_size
-    };
     isTransferring.value = false;
   } catch (e) {
     console.error('Send error:', e);
@@ -243,7 +323,7 @@ async function copyTicket() {
 }
 
 function resetState() {
-  selectedFile.value = null;
+  selectedItems.value = [];
   ticket.value = null;
   error.value = null;
   isTransferring.value = false;
@@ -268,21 +348,46 @@ function formatFileSize(bytes: number): string {
   overflow-y: auto;
 }
 
+.selection-buttons {
+  display: flex;
+  gap: var(--spacing-md);
+  justify-content: center;
+}
+
+.selection-buttons .btn {
+  display: flex;
+  align-items: center;
+  gap: var(--spacing-xs);
+}
+
+.file-list {
+  max-height: 200px;
+  overflow-y: auto;
+  margin-bottom: var(--spacing-md);
+}
+
 .file-info {
   display: flex;
   align-items: center;
   gap: var(--spacing-md);
+  padding: var(--spacing-sm) 0;
+  border-bottom: 1px solid var(--bg-tertiary);
+}
+
+.file-info:last-of-type {
+  border-bottom: none;
 }
 
 .file-icon {
-  width: 48px;
-  height: 48px;
+  width: 40px;
+  height: 40px;
   display: flex;
   align-items: center;
   justify-content: center;
   background: var(--bg-tertiary);
   border-radius: var(--radius-md);
-  font-size: 24px;
+  font-size: 20px;
+  flex-shrink: 0;
 }
 
 .file-details {
@@ -291,8 +396,26 @@ function formatFileSize(bytes: number): string {
 }
 
 .file-details h3 {
+  font-size: 0.9rem;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
+}
+
+.file-details p {
+  font-size: 0.75rem;
+}
+
+.total-info {
+  display: flex;
+  justify-content: space-between;
+  padding: var(--spacing-md) 0;
+  border-top: 1px solid var(--bg-glass);
+  margin-top: var(--spacing-sm);
+}
+
+.clear-btn {
+  width: 100%;
+  margin-bottom: var(--spacing-md);
 }
 </style>
