@@ -26,8 +26,8 @@ serde_json = "1"
 tauri-plugin-fs = "2"
 
 # Iroh ecosystem for sendme functionality
-iroh = "0.34"
-iroh-blobs = { version = "0.34", features = ["rpc"] }
+iroh = "0.96.1"
+iroh-blobs = { version = "0.98.0", features = ["rpc"] }
 
 # Async runtime and utilities
 tokio = { version = "1", features = ["full"] }
@@ -38,5 +38,5 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
 # For file metadata
 walkdir = "2"
-dirs = "5"
-rand = "0.8"
+dirs = "6.0.0"
+rand = "0.9.2"
