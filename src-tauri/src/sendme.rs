@@ -134,7 +134,7 @@ pub async fn start_send(
         percent: 10.0,
     });
 
-    // Create persistent blob store using the builder pattern
+    // Create blob store using Blobs builder
     let blobs = Blobs::persistent(temp_dir.path())
         .await
         .context("Failed to create blob store")?
@@ -172,20 +172,31 @@ pub async fn start_send(
 
     // Emit progress
     let _ = app.emit("transfer-progress", TransferProgress {
-        status: "Generating ticket...".to_string(),
+        status: "Starting server...".to_string(),
         bytes_transferred: file_size,
         total_bytes: file_size,
-        percent: 80.0,
+        percent: 60.0,
     });
 
-    // Build router with blobs protocol
+    // Build router with blobs protocol - this starts serving the blobs
     let router = Router::builder(endpoint)
         .accept(iroh_blobs::ALPN, blobs.clone())
         .spawn()
         .await
         .context("Failed to start protocol router")?;
 
-    // Generate ticket
+    // Wait for the endpoint to be online (connected to relay)
+    router.endpoint().home_relay().initialized().await?;
+
+    // Emit progress
+    let _ = app.emit("transfer-progress", TransferProgress {
+        status: "Generating ticket...".to_string(),
+        bytes_transferred: file_size,
+        total_bytes: file_size,
+        percent: 80.0,
+    });
+
+    // Generate ticket with the node address
     let node_addr = router.endpoint().node_addr().await?;
     let ticket = BlobTicket::new(node_addr, hash, BlobFormat::Raw)?;
     let ticket_string = ticket.to_string();
@@ -263,7 +274,7 @@ pub async fn receive_file(
         .await
         .context("Failed to create iroh endpoint")?;
 
-    // Create blob store and blobs handler
+    // Create blob store
     let blobs = Blobs::persistent(temp_dir.path())
         .await
         .context("Failed to create blob store")?
@@ -272,6 +283,24 @@ pub async fn receive_file(
     // Emit progress
     let _ = app.emit("transfer-progress", TransferProgress {
         status: "Establishing connection...".to_string(),
+        bytes_transferred: 0,
+        total_bytes: 0,
+        percent: 10.0,
+    });
+
+    // Spawn the router so we can receive data via the protocol
+    let router = Router::builder(endpoint.clone())
+        .accept(iroh_blobs::ALPN, blobs.clone())
+        .spawn()
+        .await
+        .context("Failed to start protocol router")?;
+
+    // Wait for endpoint to be online
+    router.endpoint().home_relay().initialized().await?;
+
+    // Emit progress
+    let _ = app.emit("transfer-progress", TransferProgress {
+        status: "Connecting to peer...".to_string(),
         bytes_transferred: 0,
         total_bytes: 0,
         percent: 20.0,
@@ -289,15 +318,25 @@ pub async fn receive_file(
         status: "Downloading...".to_string(),
         bytes_transferred: 0,
         total_bytes: 0,
-        percent: 40.0,
+        percent: 30.0,
     });
 
-    client
+    // Start the download and await it
+    let download = client
         .download(hash, node_addr)
         .await
-        .context("Failed to start download")?
-        .await
-        .context("Download failed")?;
+        .context("Failed to start download")?;
+    
+    // Emit progress during download
+    let _ = app.emit("transfer-progress", TransferProgress {
+        status: "Transferring data...".to_string(),
+        bytes_transferred: 0,
+        total_bytes: 0,
+        percent: 50.0,
+    });
+
+    // Wait for download to complete
+    download.await.context("Download failed")?;
 
     // Emit progress
     let _ = app.emit("transfer-progress", TransferProgress {
@@ -336,8 +375,8 @@ pub async fn receive_file(
         percent: 100.0,
     });
 
-    // Cleanup
-    endpoint.close().await;
+    // Cleanup - shutdown router first
+    router.shutdown().await?;
 
     Ok(ReceiveResult {
         file_path: final_path.to_string_lossy().to_string(),
