@@ -117,6 +117,7 @@ import { invoke } from '@tauri-apps/api/core';
 import { listen, UnlistenFn } from '@tauri-apps/api/event';
 import { open } from '@tauri-apps/plugin-dialog';
 import { readFile } from '@tauri-apps/plugin-fs';
+import { basename } from '@tauri-apps/api/path';
 
 interface TransferProgress {
   status: string;
@@ -179,10 +180,26 @@ onUnmounted(() => {
 });
 
 /**
- * Extract a human-readable filename from a path or content URI
+ * Get filename from a path using Tauri's path API
+ * This properly resolves Android content URIs to display names
  */
-function extractFileName(filePath: string): string {
-  // Decode URL-encoded characters
+async function getFileName(filePath: string): Promise<string> {
+  try {
+    // Use Tauri's basename which properly resolves Android content URIs
+    const name = await basename(filePath);
+    if (name && name.length > 0) {
+      // Decode URL-encoded characters if present
+      try {
+        return decodeURIComponent(name);
+      } catch {
+        return name;
+      }
+    }
+  } catch (e) {
+    console.error('Failed to get basename:', e);
+  }
+  
+  // Fallback: manual extraction
   let decoded = filePath;
   try {
     decoded = decodeURIComponent(filePath);
@@ -190,35 +207,14 @@ function extractFileName(filePath: string): string {
     // If decoding fails, use as-is
   }
   
-  // Check if this is an Android content URI
-  if (decoded.startsWith('content://')) {
-    // Try to extract a meaningful name from the URI
-    // Common patterns: 
-    // - content://media/external/file/1234 -> use the file ID
-    // - content://com.android.providers.downloads.documents/document/raw%3A%2Fstorage%2F... -> extract filename
-    
-    // Check for document ID pattern with path
-    const rawPathMatch = decoded.match(/raw:([^&]+)/);
-    if (rawPathMatch) {
-      const rawPath = rawPathMatch[1];
-      const name = rawPath.split('/').pop();
-      if (name) return name;
-    }
-    
-    // Check for display name in query params (some content providers include it)
-    const displayNameMatch = decoded.match(/displayName=([^&]+)/);
-    if (displayNameMatch) {
-      return displayNameMatch[1];
-    }
-    
-    // For mediastore URIs, generate a name with extension based on mime type
-    // Since we can't get the real name, prompt user or use a generic name
-    return '';  // Return empty to trigger manual name input
-  }
-  
   // Regular file path - extract filename
   const parts = decoded.split(/[/\\]/);
-  return parts[parts.length - 1] || decoded;
+  const name = parts[parts.length - 1];
+  if (name && !name.startsWith('content:')) {
+    return name;
+  }
+  
+  return '';  // Return empty to trigger manual name input
 }
 
 async function selectFiles() {
@@ -257,7 +253,7 @@ async function selectFolder() {
     
     if (selected) {
       const folderPath = Array.isArray(selected) ? selected[0] : selected;
-      const name = extractFileName(folderPath) || 'folder';
+      const name = await getFileName(folderPath) || 'folder';
       
       // For folders, we don't read the data here - the backend handles it
       selectedItems.value = [{
@@ -278,12 +274,11 @@ async function processSelectedPaths(paths: string[], isDir: boolean) {
   
   for (let i = 0; i < paths.length; i++) {
     const filePath = paths[i];
-    let name = extractFileName(filePath);
+    let name = await getFileName(filePath);
     let needsName = false;
     
-    // If we couldn't extract a name (Android content URI), mark for manual input
+    // If we couldn't extract a name, mark for manual input
     if (!name) {
-      // Use a friendly placeholder that indicates they need to enter the name
       name = `File ${i + 1}`;
       needsName = true;
     }
