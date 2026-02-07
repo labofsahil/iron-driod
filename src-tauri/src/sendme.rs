@@ -6,9 +6,11 @@
 use anyhow::{anyhow, Context, Result};
 use iroh::{protocol::Router, Endpoint, RelayMode, SecretKey};
 use iroh_blobs::{
-    net_protocol::Blobs,
+    api::downloader::Downloader,
+    store::fs::FsStore,
     ticket::BlobTicket,
     BlobFormat,
+    BlobsProtocol,
 };
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
@@ -126,7 +128,7 @@ pub async fn start_send(
 
     // Initialize iroh endpoint
     info!("Creating iroh endpoint...");
-    let secret_key = SecretKey::generate(rand::rngs::OsRng);
+    let secret_key = SecretKey::generate(&mut rand::rng());
     let endpoint = Endpoint::builder()
         .secret_key(secret_key)
         .relay_mode(RelayMode::Default)
@@ -143,12 +145,12 @@ pub async fn start_send(
         percent: 10.0,
     });
 
-    // Create blob store using Blobs builder
+    // Create blob store using FsStore + BlobsProtocol
     info!("Creating blob store...");
-    let blobs = Blobs::persistent(temp_dir.path())
+    let store = FsStore::load(temp_dir.path())
         .await
-        .context("Failed to create blob store")?
-        .build(&endpoint);
+        .context("Failed to create blob store")?;
+    let blobs = BlobsProtocol::new(&store, None);
     info!("Blob store created");
 
     // Emit progress
@@ -160,7 +162,7 @@ pub async fn start_send(
     });
 
     // Get the client for operations
-    let client = blobs.client();
+    let client = store.blobs();
 
     // Import the file using the client API
     info!("Reading file data...");
@@ -197,15 +199,13 @@ pub async fn start_send(
     // Build router with blobs protocol - this starts serving the blobs
     info!("Spawning router...");
     let router = Router::builder(endpoint)
-        .accept(iroh_blobs::ALPN, blobs.clone())
-        .spawn()
-        .await
-        .context("Failed to start protocol router")?;
+        .accept(iroh_blobs::ALPN, blobs)
+        .spawn();
     info!("Router spawned");
 
     // Wait for the endpoint to be online (connected to relay)
     info!("Waiting for relay connection...");
-    router.endpoint().home_relay().initialized().await?;
+    router.endpoint().online().await;
     info!("Connected to relay!");
 
     // Emit progress
@@ -216,10 +216,10 @@ pub async fn start_send(
         percent: 80.0,
     });
 
-    // Generate ticket with the node address
-    let node_addr = router.endpoint().node_addr().await?;
-    info!("Node address: {:?}", node_addr);
-    let ticket = BlobTicket::new(node_addr, hash, BlobFormat::Raw)?;
+    // Generate ticket with the endpoint address
+    let addr = router.endpoint().addr();
+    info!("Endpoint address: {:?}", addr);
+    let ticket = BlobTicket::new(addr, hash, BlobFormat::Raw);
     let ticket_string = ticket.to_string();
     info!("Generated ticket: {}", &ticket_string[..50.min(ticket_string.len())]);
 
@@ -273,7 +273,7 @@ pub async fn start_send_bytes(
 
     // Initialize iroh endpoint
     info!("Creating iroh endpoint...");
-    let secret_key = SecretKey::generate(rand::rngs::OsRng);
+    let secret_key = SecretKey::generate(&mut rand::rng());
     let endpoint = Endpoint::builder()
         .secret_key(secret_key)
         .relay_mode(RelayMode::Default)
@@ -290,12 +290,12 @@ pub async fn start_send_bytes(
         percent: 10.0,
     });
 
-    // Create blob store using Blobs builder
+    // Create blob store using FsStore + BlobsProtocol
     info!("Creating blob store...");
-    let blobs = Blobs::persistent(temp_dir.path())
+    let store = FsStore::load(temp_dir.path())
         .await
-        .context("Failed to create blob store")?
-        .build(&endpoint);
+        .context("Failed to create blob store")?;
+    let blobs = BlobsProtocol::new(&store, None);
     info!("Blob store created");
 
     // Emit progress
@@ -307,7 +307,7 @@ pub async fn start_send_bytes(
     });
 
     // Get the client for operations
-    let client = blobs.client();
+    let client = store.blobs();
 
     // Add bytes directly to store
     info!("Adding {} bytes to store...", data.len());
@@ -326,15 +326,13 @@ pub async fn start_send_bytes(
     // Build router with blobs protocol - this starts serving the blobs
     info!("Spawning router...");
     let router = Router::builder(endpoint)
-        .accept(iroh_blobs::ALPN, blobs.clone())
-        .spawn()
-        .await
-        .context("Failed to start protocol router")?;
+        .accept(iroh_blobs::ALPN, blobs)
+        .spawn();
     info!("Router spawned");
 
     // Wait for the endpoint to be online (connected to relay)
     info!("Waiting for relay connection...");
-    router.endpoint().home_relay().initialized().await?;
+    router.endpoint().online().await;
     info!("Connected to relay!");
 
     // Emit progress
@@ -345,10 +343,10 @@ pub async fn start_send_bytes(
         percent: 80.0,
     });
 
-    // Generate ticket with the node address
-    let node_addr = router.endpoint().node_addr().await?;
-    info!("Node address: {:?}", node_addr);
-    let ticket = BlobTicket::new(node_addr, hash, BlobFormat::Raw)?;
+    // Generate ticket with the endpoint address
+    let addr = router.endpoint().addr();
+    info!("Endpoint address: {:?}", addr);
+    let ticket = BlobTicket::new(addr, hash, BlobFormat::Raw);
     let ticket_string = ticket.to_string();
     info!("Generated ticket: {}", &ticket_string[..50.min(ticket_string.len())]);
 
@@ -427,7 +425,7 @@ pub async fn receive_file(
 
     // Initialize iroh endpoint for client
     info!("Creating iroh endpoint...");
-    let secret_key = SecretKey::generate(rand::rngs::OsRng);
+    let secret_key = SecretKey::generate(&mut rand::rng());
     let endpoint = Endpoint::builder()
         .secret_key(secret_key)
         .relay_mode(RelayMode::Default)
@@ -438,10 +436,10 @@ pub async fn receive_file(
 
     // Create blob store
     info!("Creating blob store...");
-    let blobs = Blobs::persistent(temp_dir.path())
+    let store = FsStore::load(temp_dir.path())
         .await
-        .context("Failed to create blob store")?
-        .build(&endpoint);
+        .context("Failed to create blob store")?;
+    let blobs = BlobsProtocol::new(&store, None);
     info!("Blob store created");
 
     // Emit progress
@@ -455,15 +453,13 @@ pub async fn receive_file(
     // Spawn the router so we can receive data via the protocol
     info!("Spawning router...");
     let router = Router::builder(endpoint.clone())
-        .accept(iroh_blobs::ALPN, blobs.clone())
-        .spawn()
-        .await
-        .context("Failed to start protocol router")?;
+        .accept(iroh_blobs::ALPN, blobs)
+        .spawn();
     info!("Router spawned");
 
     // Wait for endpoint to be online
     info!("Waiting for relay connection...");
-    router.endpoint().home_relay().initialized().await?;
+    router.endpoint().online().await;
     info!("Connected to relay!");
 
     // Emit progress
@@ -476,11 +472,11 @@ pub async fn receive_file(
 
     // Get hash and node address from ticket
     let hash = ticket.hash();
-    let node_addr = ticket.node_addr().clone();
+    let (node_addr, _, _) = ticket.into_parts();
     info!("Attempting to download from node: {:?}", node_addr);
 
     // Use the client to download
-    let client = blobs.client();
+    let client = store.blobs();
 
     // Download the blob
     let _ = app.emit("transfer-progress", TransferProgress {
@@ -490,12 +486,10 @@ pub async fn receive_file(
         percent: 30.0,
     });
 
-    // Start the download and await it
+    // Start the download using Downloader
     info!("Starting download...");
-    let download = client
-        .download(hash, node_addr)
-        .await
-        .context("Failed to start download")?;
+    let downloader = Downloader::new(&store, router.endpoint());
+    let _download = downloader.download(hash, [node_addr.id]).await?;
     info!("Download started, waiting for completion...");
     
     // Emit progress during download
@@ -506,8 +500,7 @@ pub async fn receive_file(
         percent: 50.0,
     });
 
-    // Wait for download to complete
-    download.await.context("Download failed")?;
+    // Download is complete at this point
     info!("Download complete!");
 
     // Emit progress
@@ -526,16 +519,9 @@ pub async fn receive_file(
     // Export the blob to a file
     info!("Starting export...");
     client
-        .export(
-            hash,
-            final_path.clone(),
-            iroh_blobs::store::ExportFormat::Blob,
-            iroh_blobs::store::ExportMode::Copy,
-        )
+        .export(hash, &final_path)
         .await
-        .context("Failed to start export")?
-        .await
-        .context("Export failed")?;
+        .context("Failed to export blob")?;
     info!("Export complete!");
 
     let file_size = std::fs::metadata(&final_path)
