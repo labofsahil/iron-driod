@@ -94,7 +94,7 @@ fn get_name(path: &Path) -> String {
 }
 
 /// Start sending a file or directory
-/// Accepts either a file path OR raw bytes (for Android content:// URIs)
+/// Creates a Collection with proper filenames that receivers can extract
 pub async fn start_send(
     state: &SendmeState,
     path: String,
@@ -157,7 +157,7 @@ pub async fn start_send(
 
     // Emit progress
     let _ = app.emit("transfer-progress", TransferProgress {
-        status: "Importing file...".to_string(),
+        status: "Importing files...".to_string(),
         bytes_transferred: 0,
         total_bytes: file_size,
         percent: 20.0,
@@ -166,29 +166,49 @@ pub async fn start_send(
     // Get the client for operations
     let client = store.blobs();
 
-    // Import the file using the client API
-    info!("Reading file data...");
-    let hash = if path.is_file() {
-        // Read file and add to store using client
+    // Create a Collection with proper filenames
+    let mut collection = Collection::default();
+    
+    if path.is_file() {
+        // Single file: add to collection with its name
+        info!("Importing single file: {}", file_name);
         let data = tokio::fs::read(&path).await.context("Failed to read file")?;
         info!("Read {} bytes from file", data.len());
         let add_outcome = client.add_bytes(data).await.context("Failed to add bytes")?;
         info!("Added bytes to store, hash: {}", add_outcome.hash);
-        add_outcome.hash
+        collection.push(file_name.clone(), add_outcome.hash);
     } else {
-        // For directories, read all files and create a simple blob
-        let mut all_data = Vec::new();
+        // Directory: recursively add all files with relative paths
+        info!("Importing directory: {}", path.display());
+        let base_path = path.canonicalize().context("Failed to canonicalize path")?;
+        
         for entry in WalkDir::new(&path).into_iter().filter_map(|e| e.ok()) {
             if entry.file_type().is_file() {
-                let file_data = tokio::fs::read(entry.path()).await?;
-                all_data.extend(file_data);
+                let file_path = entry.path();
+                let relative_path = file_path
+                    .strip_prefix(&base_path)
+                    .unwrap_or(file_path)
+                    .to_string_lossy()
+                    .to_string();
+                
+                info!("Importing: {} -> {}", file_path.display(), relative_path);
+                let file_data = tokio::fs::read(file_path).await?;
+                let add_outcome = client.add_bytes(file_data).await.context("Failed to add bytes")?;
+                info!("Added file, hash: {}", add_outcome.hash);
+                collection.push(relative_path, add_outcome.hash);
             }
         }
-        info!("Read {} bytes from directory", all_data.len());
-        let add_outcome = client.add_bytes(all_data).await.context("Failed to add bytes")?;
-        info!("Added bytes to store, hash: {}", add_outcome.hash);
-        add_outcome.hash
-    };
+    }
+    
+    info!("Collection has {} entries", collection.len());
+
+    // Store the collection to get its root hash
+    info!("Storing collection...");
+    let collection_tag = collection.store(store.as_ref())
+        .await
+        .context("Failed to store collection")?;
+    let collection_hash = collection_tag.hash();
+    info!("Collection stored, hash: {}", collection_hash);
 
     // Emit progress
     let _ = app.emit("transfer-progress", TransferProgress {
@@ -218,10 +238,10 @@ pub async fn start_send(
         percent: 80.0,
     });
 
-    // Generate ticket with the endpoint address
+    // Generate ticket with the endpoint address - use HashSeq format for collections
     let addr = router.endpoint().addr();
     info!("Endpoint address: {:?}", addr);
-    let ticket = BlobTicket::new(addr, hash, BlobFormat::Raw);
+    let ticket = BlobTicket::new(addr, collection_hash, BlobFormat::HashSeq);
     let ticket_string = ticket.to_string();
     info!("Generated ticket: {}", &ticket_string[..50.min(ticket_string.len())]);
 
@@ -311,11 +331,22 @@ pub async fn start_send_bytes(
     // Get the client for operations
     let client = store.blobs();
 
-    // Add bytes directly to store
+    // Add bytes directly to store and create Collection with filename
     info!("Adding {} bytes to store...", data.len());
     let add_outcome = client.add_bytes(data).await.context("Failed to add bytes")?;
-    let hash = add_outcome.hash;
-    info!("Added bytes to store, hash: {}", hash);
+    info!("Added bytes to store, hash: {}", add_outcome.hash);
+    
+    // Create a Collection with the filename
+    let mut collection = Collection::default();
+    collection.push(file_name.clone(), add_outcome.hash);
+    
+    // Store the collection to get its root hash
+    info!("Storing collection...");
+    let collection_tag = collection.store(store.as_ref())
+        .await
+        .context("Failed to store collection")?;
+    let collection_hash = collection_tag.hash();
+    info!("Collection stored, hash: {}", collection_hash);
 
     // Emit progress
     let _ = app.emit("transfer-progress", TransferProgress {
@@ -345,10 +376,10 @@ pub async fn start_send_bytes(
         percent: 80.0,
     });
 
-    // Generate ticket with the endpoint address
+    // Generate ticket with the endpoint address - use HashSeq format for collections
     let addr = router.endpoint().addr();
     info!("Endpoint address: {:?}", addr);
-    let ticket = BlobTicket::new(addr, hash, BlobFormat::Raw);
+    let ticket = BlobTicket::new(addr, collection_hash, BlobFormat::HashSeq);
     let ticket_string = ticket.to_string();
     info!("Generated ticket: {}", &ticket_string[..50.min(ticket_string.len())]);
 
