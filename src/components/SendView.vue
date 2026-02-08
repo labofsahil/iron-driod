@@ -365,7 +365,7 @@ async function startSend() {
       // Single file with data: use bytes-based send
       console.log('Using start_send_bytes with', firstItem.data.length, 'bytes');
       result = await invoke<SendResult>('start_send_bytes', {
-        fileName: firstItem.name,
+        file_name: firstItem.name,
         data: Array.from(firstItem.data)
       });
     } else if (selectedItems.value.length === 1) {
@@ -380,7 +380,7 @@ async function startSend() {
       console.log('Multiple files - sending first file:', firstItem.path);
       if (firstItem.data) {
         result = await invoke<SendResult>('start_send_bytes', {
-          fileName: firstItem.name,
+          file_name: firstItem.name,
           data: Array.from(firstItem.data)
         });
       } else {
