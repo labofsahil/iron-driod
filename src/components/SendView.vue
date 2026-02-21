@@ -112,7 +112,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref, computed, onMounted, onUnmounted } from 'vue';
+import { ref, computed, onMounted, onUnmounted, markRaw } from 'vue';
 import { invoke } from '@tauri-apps/api/core';
 import { listen, UnlistenFn } from '@tauri-apps/api/event';
 import { open } from '@tauri-apps/plugin-dialog';
@@ -293,7 +293,7 @@ async function processSelectedPaths(paths: string[], isDir: boolean) {
         size: data.length,
         isDir: false,
         needsName,
-        data: data
+        data: markRaw(data)
       });
     } catch (readErr) {
       console.error('Failed to read file:', readErr);
