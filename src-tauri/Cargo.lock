@@ -2814,7 +2814,7 @@ dependencies = [
  "dirs",
  "iroh",
  "iroh-blobs",
- "rand 0.9.2",
+ "rand 0.8.5",
  "serde",
  "serde_json",
  "tauri",

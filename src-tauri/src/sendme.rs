@@ -4,7 +4,7 @@
 //! adapted for use within a Tauri mobile application.
 
 use anyhow::{anyhow, Context, Result};
-use iroh::{protocol::Router, Endpoint, RelayMode, SecretKey};
+use iroh::{protocol::Router, Endpoint, RelayMode};
 use iroh_blobs::{
     api::downloader::Downloader,
     format::collection::Collection,
@@ -156,9 +156,7 @@ pub async fn start_send(
 
     // Initialize iroh endpoint
     info!("Creating iroh endpoint...");
-    let secret_key = SecretKey::generate(&mut rand::rng());
     let endpoint = Endpoint::builder()
-        .secret_key(secret_key)
         .relay_mode(RelayMode::Default)
         .bind()
         .await
@@ -320,9 +318,7 @@ pub async fn start_send_bytes(
 
     // Initialize iroh endpoint
     info!("Creating iroh endpoint...");
-    let secret_key = SecretKey::generate(&mut rand::rng());
     let endpoint = Endpoint::builder()
-        .secret_key(secret_key)
         .relay_mode(RelayMode::Default)
         .bind()
         .await
@@ -483,9 +479,7 @@ pub async fn receive_file(
 
     // Initialize iroh endpoint for client
     info!("Creating iroh endpoint...");
-    let secret_key = SecretKey::generate(&mut rand::rng());
     let endpoint = Endpoint::builder()
-        .secret_key(secret_key)
         .relay_mode(RelayMode::Default)
         .bind()
         .await
@@ -701,8 +695,7 @@ pub async fn start_send_multiple(
 
     let temp_dir = tempfile::Builder::new().prefix(".iron-send-").tempdir().context("Failed to create temp directory")?;
     
-    let secret_key = SecretKey::generate(&mut rand::rng());
-    let endpoint = Endpoint::builder().secret_key(secret_key).relay_mode(RelayMode::Default).bind().await.context("Failed to create endpoint")?;
+    let endpoint = Endpoint::builder().relay_mode(RelayMode::Default).bind().await.context("Failed to create endpoint")?;
 
     let _ = app.emit("transfer-progress", TransferProgress {
         status: "Setting up connection...".to_string(),
@@ -810,8 +803,7 @@ pub async fn start_send_multiple_bytes(
     });
 
     let temp_dir = tempfile::Builder::new().prefix(".iron-send-").tempdir().context("Failed to create temp directory")?;
-    let secret_key = SecretKey::generate(&mut rand::rng());
-    let endpoint = Endpoint::builder().secret_key(secret_key).relay_mode(RelayMode::Default).bind().await.context("Failed to create endpoint")?;
+    let endpoint = Endpoint::builder().relay_mode(RelayMode::Default).bind().await.context("Failed to create endpoint")?;
 
     let _ = app.emit("transfer-progress", TransferProgress {
         status: "Setting up connection...".to_string(),
