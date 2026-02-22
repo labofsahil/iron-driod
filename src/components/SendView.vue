@@ -117,7 +117,8 @@ import { ref, computed, onMounted, onUnmounted } from 'vue';
 import { invoke } from '@tauri-apps/api/core';
 import { listen, UnlistenFn } from '@tauri-apps/api/event';
 import { open } from '@tauri-apps/plugin-dialog';
-import { readFile } from '@tauri-apps/plugin-fs';
+import { basename } from '@tauri-apps/api/path';
+import { readFile, stat } from '@tauri-apps/plugin-fs';
 
 interface FileInfo {
   name: string;
@@ -189,12 +190,30 @@ onUnmounted(() => {
  * Fast and doesn't freeze UI
  */
 async function getFileInfo(filePath: string): Promise<FileInfo | null> {
+  let name = "";
+  let size = 0;
+
   try {
-    const info = await invoke<FileInfo>('get_file_info', { path: filePath });
-    return info;
+    // Rust backend get_file_info only works for standard file paths (not content://)
+    if (!filePath.startsWith('content://')) {
+      const info = await invoke<FileInfo>('get_file_info', { path: filePath });
+      return info;
+    }
   } catch (e) {
-    console.error('Failed to get file info:', e);
-    // Fallback: manual extraction
+    console.error('Failed to get file info from Rust:', e);
+  }
+
+  // Fallback for Android content:// URIs
+  try {
+    const base = await basename(filePath);
+    if (base) {
+      name = decodeURIComponent(base);
+    }
+  } catch (e) {
+    console.error('Failed to get basename:', e);
+  }
+  
+  if (!name) {
     let decoded = filePath;
     try {
       decoded = decodeURIComponent(filePath);
@@ -204,13 +223,25 @@ async function getFileInfo(filePath: string): Promise<FileInfo | null> {
     
     // Regular file path - extract filename
     const parts = decoded.split(/[/\\]/);
-    const name = parts[parts.length - 1];
-    if (name && !name.startsWith('content:')) {
-      return { name, size: 0 };
+    const extracted = parts[parts.length - 1];
+    if (extracted && !extracted.startsWith('content:')) {
+      name = extracted;
     }
-    
-    return null;
   }
+
+  // Try to get size from Tauri's stat API which might support content:// on Android
+  try {
+    const fileStat = await stat(filePath);
+    size = fileStat.size || 0;
+  } catch(e) {
+    console.warn('Could not stat file size:', e);
+  }
+
+  if (name) {
+    return { name, size };
+  }
+  
+  return null;
 }
 
 async function selectFiles() {
