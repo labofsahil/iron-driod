@@ -40,3 +40,4 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 walkdir = "2"
 dirs = "6.0.0"
 rand = "0.9.2"
+uuid = { version = "1.21.0", features = ["v4"] }

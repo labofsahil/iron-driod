@@ -9,6 +9,9 @@
     "core:default",
     "dialog:default",
     "opener:default",
-    "fs:default"
+    "fs:default",
+    "fs:allow-stat",
+    "fs:allow-exists",
+    "fs:allow-read-file"
   ]
 }
