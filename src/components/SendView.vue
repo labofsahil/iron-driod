@@ -118,7 +118,11 @@ import { invoke } from '@tauri-apps/api/core';
 import { listen, UnlistenFn } from '@tauri-apps/api/event';
 import { open } from '@tauri-apps/plugin-dialog';
 import { readFile } from '@tauri-apps/plugin-fs';
-import { basename } from '@tauri-apps/api/path';
+
+interface FileInfo {
+  name: string;
+  size: number;
+}
 
 interface TransferProgress {
   status: string;
@@ -181,45 +185,35 @@ onUnmounted(() => {
 });
 
 /**
- * Get filename from a path using Tauri's path API
- * This properly resolves Android content URIs to display names
+ * Get file info using backend Rust command
+ * Fast and doesn't freeze UI
  */
-async function getFileName(filePath: string): Promise<string> {
+async function getFileInfo(filePath: string): Promise<FileInfo | null> {
   try {
-    // Use Tauri's basename which properly resolves Android content URIs
-    const name = await basename(filePath);
-    if (name && name.length > 0) {
-      // Decode URL-encoded characters if present
-      try {
-        return decodeURIComponent(name);
-      } catch {
-        return name;
-      }
-    }
+    const info = await invoke<FileInfo>('get_file_info', { path: filePath });
+    return info;
   } catch (e) {
-    console.error('Failed to get basename:', e);
+    console.error('Failed to get file info:', e);
+    // Fallback: manual extraction
+    let decoded = filePath;
+    try {
+      decoded = decodeURIComponent(filePath);
+    } catch {
+      // If decoding fails, use as-is
+    }
+    
+    // Regular file path - extract filename
+    const parts = decoded.split(/[/\\]/);
+    const name = parts[parts.length - 1];
+    if (name && !name.startsWith('content:')) {
+      return { name, size: 0 };
+    }
+    
+    return null;
   }
-  
-  // Fallback: manual extraction
-  let decoded = filePath;
-  try {
-    decoded = decodeURIComponent(filePath);
-  } catch {
-    // If decoding fails, use as-is
-  }
-  
-  // Regular file path - extract filename
-  const parts = decoded.split(/[/\\]/);
-  const name = parts[parts.length - 1];
-  if (name && !name.startsWith('content:')) {
-    return name;
-  }
-  
-  return '';  // Return empty to trigger manual name input
 }
 
 async function selectFiles() {
-  console.log('selectFiles called');
   try {
     // Use native file picker dialog with multiple file support
     const selected = await open({
@@ -228,18 +222,13 @@ async function selectFiles() {
       title: 'Select files to send'
     });
     
-    console.log('open dialog returned:', selected);
-    
     if (selected) {
       const paths = Array.isArray(selected) ? selected : [selected];
-      console.log('passing paths to processSelectedPaths:', paths);
       await processSelectedPaths(paths);
-    } else {
-      console.log('No files selected (selected is null/undefined)');
     }
   } catch (e) {
     console.error('File selection error:', e);
-    error.value = 'Failed to open file picker: ' + String(e);
+    error.value = 'Failed to open file picker';
   }
 }
 
@@ -260,13 +249,14 @@ async function selectFolder() {
     
     if (selected) {
       const folderPath = Array.isArray(selected) ? selected[0] : selected;
-      const name = await getFileName(folderPath) || 'folder';
+      const info = await getFileInfo(folderPath);
+      const name = info?.name || 'folder';
       
       // For folders, we don't read the data here - the backend handles it
       selectedItems.value = [{
         name,
         path: folderPath,
-        size: 0, // Will be calculated by backend
+        size: info?.size || 0, // Got exact size from backend
         isDir: true
       }];
     }
@@ -277,45 +267,37 @@ async function selectFolder() {
 }
 
 async function processSelectedPaths(paths: string[]) {
-  console.log('processSelectedPaths called with', paths.length, 'paths');
   const items: SelectedItem[] = [];
   
   for (let i = 0; i < paths.length; i++) {
     const filePath = paths[i];
-    console.log(`Processing path ${i}:`, filePath);
+    const info = await getFileInfo(filePath);
+    let name = info?.name;
+    let size = info?.size || 0;
+    let needsName = false;
+    
+    // If we couldn't extract a name, mark for manual input
+    if (!name) {
+      name = `File ${i + 1}`;
+      needsName = true;
+    }
     
     try {
-      console.log('Getting filename for:', filePath);
-      let name = await getFileName(filePath);
-      console.log('getFileName returned:', name);
-      
-      let needsName = false;
-      
-      // If we couldn't extract a name, mark for manual input
-      if (!name) {
-        name = `File ${i + 1}`;
-        needsName = true;
-        console.log('Name extraction failed, using default name:', name);
-      }
-      
       // Don't read the file data yet! Reading large files blocks the UI and IPC bridge.
       // We'll read it right before sending.
-      console.log('Pushing item to array for path:', filePath);
       items.push({
         name,
         path: filePath,
-        size: 0, // We don't have the exact size yet without reading it, backend will determine this
+        size, // We have the exact size now!
         isDir: false,
         needsName
       });
     } catch (e) {
-      console.error(`Error processing file ${filePath}:`, e);
+      console.error('Error adding file to selection:', e);
     }
   }
   
-  console.log('Applying items to selectedItems.value, count:', items.length);
   selectedItems.value = items;
-  console.log('selectedItems updated successfully!');
 }
 
 function handleDrop(event: DragEvent) {

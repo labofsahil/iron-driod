@@ -57,6 +57,13 @@ pub struct SendmeState {
     active_send: Mutex<Option<SendSession>>,
 }
 
+/// File info result
+#[derive(Clone, Serialize, Deserialize)]
+pub struct FileInfo {
+    pub name: String,
+    pub size: u64,
+}
+
 impl SendmeState {
     pub fn new() -> Self {
         Self {
@@ -91,6 +98,19 @@ fn get_name(path: &Path) -> String {
     path.file_name()
         .map(|n| n.to_string_lossy().to_string())
         .unwrap_or_else(|| "unknown".to_string())
+}
+
+/// Get basic file info (name and size) efficiently without reading contents
+pub async fn get_file_info(path: String) -> Result<FileInfo> {
+    let p = PathBuf::from(&path);
+    if !p.exists() {
+        return Err(anyhow!("Path does not exist: {}", path));
+    }
+    
+    let name = get_name(&p);
+    let size = calculate_size(&p)?;
+    
+    Ok(FileInfo { name, size })
 }
 
 /// Start sending a file or directory

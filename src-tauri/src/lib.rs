@@ -4,7 +4,7 @@
 
 mod sendme;
 
-use sendme::{ReceiveResult, SendResult, SendmeState};
+use sendme::{ReceiveResult, SendResult, SendmeState, FileInfo};
 use std::sync::Arc;
 use tauri::State;
 
@@ -64,6 +64,14 @@ async fn receive_file(
         .map_err(|e| e.to_string())
 }
 
+/// Tauri command: Get file info quickly
+#[tauri::command]
+async fn get_file_info(path: String) -> Result<FileInfo, String> {
+    sendme::get_file_info(path)
+        .await
+        .map_err(|e| e.to_string())
+}
+
 /// Tauri command: Get downloads directory (platform-specific)
 #[tauri::command]
 fn get_downloads_dir() -> Result<String, String> {
@@ -110,7 +118,8 @@ pub fn run() {
             start_send_bytes,
             cancel_send,
             receive_file,
-            get_downloads_dir
+            get_downloads_dir,
+            get_file_info
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
