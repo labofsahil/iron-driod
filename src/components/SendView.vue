@@ -117,8 +117,8 @@ import { ref, computed, onMounted, onUnmounted } from 'vue';
 import { invoke } from '@tauri-apps/api/core';
 import { listen, UnlistenFn } from '@tauri-apps/api/event';
 import { open } from '@tauri-apps/plugin-dialog';
-import { basename } from '@tauri-apps/api/path';
-import { readFile, stat } from '@tauri-apps/plugin-fs';
+import { basename, tempDir, join } from '@tauri-apps/api/path';
+import { readFile, stat, writeFile, copyFile, mkdir } from '@tauri-apps/plugin-fs';
 
 interface FileInfo {
   name: string;
@@ -394,13 +394,23 @@ async function startSend() {
         path: firstItem.path
       });
     } else if (selectedItems.value.length === 1 && isAndroid && firstItem.path.startsWith('content://')) {
-      // Single Android content URI: must use bytes-based send
+      // Single Android content URI: cache locally to bypass massive JSON IPC array length errors
       progress.value.status = 'Reading file...';
-      const fileData = await readFile(firstItem.path);
-      console.log('Using start_send_bytes with', fileData.length, 'bytes');
-      result = await invoke<SendResult>('start_send_bytes', {
-        fileName: firstItem.name,
-        data: fileData // Pass Uint8Array directly, Tauri v2 serializes this to Vec<u8> much faster without Array.from OOM
+      const rootTemp = await tempDir();
+      const batchDir = await join(rootTemp, 'iron_send_' + Date.now());
+      await mkdir(batchDir);
+      const tempFilePath = await join(batchDir, firstItem.name);
+      
+      try {
+        await copyFile(firstItem.path, tempFilePath);
+      } catch(err) {
+        const fileData = await readFile(firstItem.path);
+        await writeFile(tempFilePath, fileData);
+      }
+      
+      console.log('Using standard start_send with cached path:', tempFilePath);
+      result = await invoke<SendResult>('start_send', {
+        path: tempFilePath
       });
     } else if (selectedItems.value.length === 1) {
       // Single regular file: use path-based send
@@ -416,17 +426,31 @@ async function startSend() {
       const hasContentUri = isAndroid && selectedItems.value.some(item => item.path.startsWith('content://'));
       
       if (hasContentUri) {
-        progress.value.status = 'Reading files...';
-        const filesData = [];
+        progress.value.status = 'Caching files...';
+        const paths = [];
+        const rootTemp = await tempDir();
+        const batchDir = await join(rootTemp, 'iron_send_multi_' + Date.now());
+        await mkdir(batchDir);
+        
         for (const item of selectedItems.value) {
-           const fileData = await readFile(item.path);
-           filesData.push({
-             file_name: item.name,
-             data: fileData
-           });
+           if (item.path.startsWith('content://')) {
+             progress.value.status = 'Reading ' + item.name;
+             const tempFilePath = await join(batchDir, item.name);
+             try {
+                await copyFile(item.path, tempFilePath);
+             } catch(err) {
+               const fileData = await readFile(item.path);
+               await writeFile(tempFilePath, fileData);
+             }
+             paths.push(tempFilePath);
+           } else {
+             paths.push(item.path);
+           }
         }
-        result = await invoke<SendResult>('start_send_multiple_bytes', {
-          files: filesData
+        
+        progress.value.status = 'Starting transfer...';
+        result = await invoke<SendResult>('start_send_multiple', {
+          paths: paths
         });
       } else {
         // Desktop or non-content paths: send the array of string paths directly
