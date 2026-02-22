@@ -596,8 +596,13 @@ pub async fn receive_file(
             
             info!("Export complete! Total size: {} bytes", total_size);
             
-            // Get the first filename for the result
-            let file_name = file_names.first().cloned().unwrap_or_else(|| format!("received_{}", &hash.to_string()[..8]));
+            // Get the proper filename for the result to display in UI
+            let file_name = if file_names.len() == 1 {
+                file_names.first().cloned().unwrap_or_else(|| format!("received_{}", &hash.to_string()[..8]))
+            } else {
+                format!("{} files received", file_names.len())
+            };
+            
             let final_path = if file_names.len() == 1 {
                 output_path.join(&file_name)
             } else {

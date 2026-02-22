@@ -431,16 +431,19 @@ async function startSend() {
       } else {
         // Desktop or non-content paths: send the array of string paths directly
         const paths = selectedItems.value.map(item => item.path);
+        console.log('Calling start_send_multiple with paths:', paths);
         result = await invoke<SendResult>('start_send_multiple', {
           paths: paths
         });
       }
     }
 
+    console.log('Send completed successfully. Ticket:', result.ticket);
     ticket.value = result.ticket;
     isTransferring.value = false;
   } catch (e) {
     console.error('Send error:', e);
+    alert('Failed to send files: ' + String(e));
     error.value = String(e);
     isTransferring.value = false;
   }
