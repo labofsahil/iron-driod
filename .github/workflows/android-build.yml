@@ -5,7 +5,7 @@ on:
   push:
     branches:
       - main
-      - master
+      - sendme
   pull_request:
     branches:
       - main
@@ -75,7 +75,7 @@ jobs:
 
   build-android-release:
     runs-on: blacksmith-4vcpu-ubuntu-2404
-    if: github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master')
+    if: github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/sendme')
     
     steps:
       - name: Checkout repository
