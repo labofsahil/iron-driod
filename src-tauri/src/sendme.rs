@@ -192,10 +192,9 @@ pub async fn start_send(
     if path.is_file() {
         // Single file: add to collection with its name
         info!("Importing single file: {}", file_name);
-        let data = tokio::fs::read(&path).await.context("Failed to read file")?;
-        info!("Read {} bytes from file", data.len());
-        let add_outcome = client.add_bytes(data).await.context("Failed to add bytes")?;
-        info!("Added bytes to store, hash: {}", add_outcome.hash);
+        let progress = client.add_path(&path);
+        let add_outcome = progress.await.context("Failed to add file")?;
+        info!("Added file to store, hash: {}", add_outcome.hash);
         collection.push(file_name.clone(), add_outcome.hash);
     } else {
         // Directory: recursively add all files with relative paths
@@ -212,8 +211,8 @@ pub async fn start_send(
                     .to_string();
                 
                 info!("Importing: {} -> {}", file_path.display(), relative_path);
-                let file_data = tokio::fs::read(file_path).await?;
-                let add_outcome = client.add_bytes(file_data).await.context("Failed to add bytes")?;
+                let progress = client.add_path(file_path);
+                let add_outcome = progress.await.context("Failed to add file")?;
                 info!("Added file, hash: {}", add_outcome.hash);
                 collection.push(relative_path, add_outcome.hash);
             }

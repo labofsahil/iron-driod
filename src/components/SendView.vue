@@ -298,37 +298,49 @@ async function selectFolder() {
 }
 
 async function processSelectedPaths(paths: string[]) {
-  const items: SelectedItem[] = [];
-  
-  for (let i = 0; i < paths.length; i++) {
-    const filePath = paths[i];
-    const info = await getFileInfo(filePath);
-    let name = info?.name;
-    let size = info?.size || 0;
-    let needsName = false;
-    
-    // If we couldn't extract a name, mark for manual input
-    if (!name) {
-      name = `File ${i + 1}`;
-      needsName = true;
-    }
-    
+  // 1. Immediately push all files to UI with a "needsName" placeholder or basic info
+  // This prevents the UI from freezing on Android when trying to select multiple heavy files
+  const items: SelectedItem[] = paths.map((filePath, i) => {
+    // Try to get a basic name from path string if possible (for immediate feedback)
+    let tempName = `File ${i + 1}`;
     try {
-      // Don't read the file data yet! Reading large files blocks the UI and IPC bridge.
-      // We'll read it right before sending.
-      items.push({
-        name,
-        path: filePath,
-        size, // We have the exact size now!
-        isDir: false,
-        needsName
-      });
-    } catch (e) {
-      console.error('Error adding file to selection:', e);
-    }
-  }
+      const decoded = decodeURIComponent(filePath);
+      const parts = decoded.split(/[/\\]/);
+      const extracted = parts[parts.length - 1];
+      if (extracted && !extracted.startsWith('content:')) {
+        tempName = extracted;
+      }
+    } catch {}
+
+    return {
+      name: tempName,
+      path: filePath,
+      size: 0, // Placeholder size (will show Calculating... in UI)
+      isDir: false,
+      needsName: false,
+    };
+  });
   
   selectedItems.value = items;
+
+  // 2. Fetch the proper file info (size and precise names) asynchronously without blocking UI
+  for (let i = 0; i < selectedItems.value.length; i++) {
+    const item = selectedItems.value[i];
+    
+    getFileInfo(item.path).then(info => {
+      if (info?.name) {
+        item.name = info.name;
+      } else {
+        item.needsName = true;
+      }
+      if (info?.size) {
+        item.size = info.size;
+      }
+    }).catch(e => {
+      console.error('Error fetching file info:', e);
+      item.needsName = true;
+    });
+  }
 }
 
 function handleDrop(event: DragEvent) {
@@ -388,7 +400,7 @@ async function startSend() {
       console.log('Using start_send_bytes with', fileData.length, 'bytes');
       result = await invoke<SendResult>('start_send_bytes', {
         fileName: firstItem.name,
-        data: Array.from(fileData)
+        data: fileData // Pass Uint8Array directly, Tauri v2 serializes this to Vec<u8> much faster without Array.from OOM
       });
     } else if (selectedItems.value.length === 1) {
       // Single regular file: use path-based send
@@ -405,7 +417,7 @@ async function startSend() {
         const fileData = await readFile(firstItem.path);
         result = await invoke<SendResult>('start_send_bytes', {
           fileName: firstItem.name,
-          data: Array.from(fileData)
+          data: fileData // Avoid Array.from here as well
         });
       } else {
         result = await invoke<SendResult>('start_send', {
