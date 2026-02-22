@@ -409,19 +409,30 @@ async function startSend() {
         path: firstItem.path
       });
     } else {
-      // Multiple files: need to send paths array
-      // For now, send first file - TODO: implement multi-file send command
-      console.log('Multiple files - sending first file:', firstItem.path);
-      if (isAndroid && firstItem.path.startsWith('content://')) {
-        progress.value.status = 'Reading file...';
-        const fileData = await readFile(firstItem.path);
-        result = await invoke<SendResult>('start_send_bytes', {
-          fileName: firstItem.name,
-          data: fileData // Avoid Array.from here as well
+      // Multiple files
+      console.log('Multiple files selected');
+      
+      // Check if any of the items is an Android content URI
+      const hasContentUri = isAndroid && selectedItems.value.some(item => item.path.startsWith('content://'));
+      
+      if (hasContentUri) {
+        progress.value.status = 'Reading files...';
+        const filesData = [];
+        for (const item of selectedItems.value) {
+           const fileData = await readFile(item.path);
+           filesData.push({
+             file_name: item.name,
+             data: fileData
+           });
+        }
+        result = await invoke<SendResult>('start_send_multiple_bytes', {
+          files: filesData
         });
       } else {
-        result = await invoke<SendResult>('start_send', {
-          path: firstItem.path
+        // Desktop or non-content paths: send the array of string paths directly
+        const paths = selectedItems.value.map(item => item.path);
+        result = await invoke<SendResult>('start_send_multiple', {
+          paths: paths
         });
       }
     }

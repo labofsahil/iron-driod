@@ -43,6 +43,32 @@ async fn start_send_bytes(
         .map_err(|e| e.to_string())
 }
 
+/// Tauri command: Start sending multiple files by path
+#[tauri::command]
+async fn start_send_multiple(
+    paths: Vec<String>,
+    state: State<'_, Arc<SendmeState>>,
+    app: tauri::AppHandle,
+) -> Result<SendResult, String> {
+    tracing::info!("start_send_multiple command called with {} paths", paths.len());
+    sendme::start_send_multiple(&state, paths, app)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+/// Tauri command: Start sending multiple raw byte files (for Android content:// URIs)
+#[tauri::command]
+async fn start_send_multiple_bytes(
+    files: Vec<sendme::FileDataPayload>,
+    state: State<'_, Arc<SendmeState>>,
+    app: tauri::AppHandle,
+) -> Result<SendResult, String> {
+    tracing::info!("start_send_multiple_bytes command called with {} files", files.len());
+    sendme::start_send_multiple_bytes(&state, files, app)
+        .await
+        .map_err(|e| e.to_string())
+}
+
 /// Tauri command: Cancel active send session
 #[tauri::command]
 async fn cancel_send(state: State<'_, Arc<SendmeState>>) -> Result<(), String> {
@@ -116,6 +142,8 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             start_send,
             start_send_bytes,
+            start_send_multiple,
+            start_send_multiple_bytes,
             cancel_send,
             receive_file,
             get_downloads_dir,
