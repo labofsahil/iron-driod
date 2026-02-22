@@ -37,13 +37,14 @@
               :placeholder="'Enter filename ' + (index + 1) + ' (e.g., photo.jpg)'"
             />
             <h3 v-else @click="editFileName(index)">{{ item.name }}</h3>
-            <p class="text-muted">{{ formatFileSize(item.size) }}</p>
+            <p class="text-muted" v-if="item.size > 0">{{ formatFileSize(item.size) }}</p>
+            <p class="text-muted" v-else>Ready to send</p>
           </div>
         </div>
         
         <div v-if="selectedItems.length > 1" class="total-info">
           <strong>{{ selectedItems.length }} items</strong>
-          <span class="text-muted">{{ formatFileSize(totalSize) }} total</span>
+          <span class="text-muted" v-if="totalSize > 0">{{ formatFileSize(totalSize) }} total</span>
         </div>
       </div>
       
@@ -112,7 +113,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref, computed, onMounted, onUnmounted, markRaw } from 'vue';
+import { ref, computed, onMounted, onUnmounted } from 'vue';
 import { invoke } from '@tauri-apps/api/core';
 import { listen, UnlistenFn } from '@tauri-apps/api/event';
 import { open } from '@tauri-apps/plugin-dialog';
@@ -228,7 +229,7 @@ async function selectFiles() {
     
     if (selected) {
       const paths = Array.isArray(selected) ? selected : [selected];
-      await processSelectedPaths(paths, false);
+      await processSelectedPaths(paths);
     }
   } catch (e) {
     console.error('File selection error:', e);
@@ -269,7 +270,7 @@ async function selectFolder() {
   }
 }
 
-async function processSelectedPaths(paths: string[], isDir: boolean) {
+async function processSelectedPaths(paths: string[]) {
   const items: SelectedItem[] = [];
   
   for (let i = 0; i < paths.length; i++) {
@@ -284,27 +285,17 @@ async function processSelectedPaths(paths: string[], isDir: boolean) {
     }
     
     try {
-      console.log('Reading file:', filePath);
-      const data = await readFile(filePath);
-      console.log('File read successfully, size:', data.length);
+      // Don't read the file data yet! Reading large files blocks the UI and IPC bridge.
+      // We'll read it right before sending.
       items.push({
         name,
         path: filePath,
-        size: data.length,
+        size: 0, // We don't have the exact size yet without reading it, backend will determine this
         isDir: false,
-        needsName,
-        data: markRaw(data)
-      });
-    } catch (readErr) {
-      console.error('Failed to read file:', readErr);
-      // Fallback: store without data
-      items.push({
-        name,
-        path: filePath,
-        size: 0,
-        isDir: isDir,
         needsName
       });
+    } catch (e) {
+      console.error('Error adding file to selection:', e);
     }
   }
   
@@ -361,15 +352,17 @@ async function startSend() {
       result = await invoke<SendResult>('start_send', {
         path: firstItem.path
       });
-    } else if (selectedItems.value.length === 1 && firstItem.data) {
-      // Single file with data: use bytes-based send
-      console.log('Using start_send_bytes with', firstItem.data.length, 'bytes');
+    } else if (selectedItems.value.length === 1 && isAndroid && firstItem.path.startsWith('content://')) {
+      // Single Android content URI: must use bytes-based send
+      progress.value.status = 'Reading file...';
+      const fileData = await readFile(firstItem.path);
+      console.log('Using start_send_bytes with', fileData.length, 'bytes');
       result = await invoke<SendResult>('start_send_bytes', {
         fileName: firstItem.name,
-        data: Array.from(firstItem.data)
+        data: Array.from(fileData)
       });
     } else if (selectedItems.value.length === 1) {
-      // Single file without data: use path-based send
+      // Single regular file: use path-based send
       console.log('Using start_send with path:', firstItem.path);
       result = await invoke<SendResult>('start_send', {
         path: firstItem.path
@@ -378,10 +371,12 @@ async function startSend() {
       // Multiple files: need to send paths array
       // For now, send first file - TODO: implement multi-file send command
       console.log('Multiple files - sending first file:', firstItem.path);
-      if (firstItem.data) {
+      if (isAndroid && firstItem.path.startsWith('content://')) {
+        progress.value.status = 'Reading file...';
+        const fileData = await readFile(firstItem.path);
         result = await invoke<SendResult>('start_send_bytes', {
           fileName: firstItem.name,
-          data: Array.from(firstItem.data)
+          data: Array.from(fileData)
         });
       } else {
         result = await invoke<SendResult>('start_send', {
