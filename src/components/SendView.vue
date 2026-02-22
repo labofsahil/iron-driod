@@ -219,6 +219,7 @@ async function getFileName(filePath: string): Promise<string> {
 }
 
 async function selectFiles() {
+  console.log('selectFiles called');
   try {
     // Use native file picker dialog with multiple file support
     const selected = await open({
@@ -227,13 +228,18 @@ async function selectFiles() {
       title: 'Select files to send'
     });
     
+    console.log('open dialog returned:', selected);
+    
     if (selected) {
       const paths = Array.isArray(selected) ? selected : [selected];
+      console.log('passing paths to processSelectedPaths:', paths);
       await processSelectedPaths(paths);
+    } else {
+      console.log('No files selected (selected is null/undefined)');
     }
   } catch (e) {
     console.error('File selection error:', e);
-    error.value = 'Failed to open file picker';
+    error.value = 'Failed to open file picker: ' + String(e);
   }
 }
 
@@ -271,22 +277,30 @@ async function selectFolder() {
 }
 
 async function processSelectedPaths(paths: string[]) {
+  console.log('processSelectedPaths called with', paths.length, 'paths');
   const items: SelectedItem[] = [];
   
   for (let i = 0; i < paths.length; i++) {
     const filePath = paths[i];
-    let name = await getFileName(filePath);
-    let needsName = false;
-    
-    // If we couldn't extract a name, mark for manual input
-    if (!name) {
-      name = `File ${i + 1}`;
-      needsName = true;
-    }
+    console.log(`Processing path ${i}:`, filePath);
     
     try {
+      console.log('Getting filename for:', filePath);
+      let name = await getFileName(filePath);
+      console.log('getFileName returned:', name);
+      
+      let needsName = false;
+      
+      // If we couldn't extract a name, mark for manual input
+      if (!name) {
+        name = `File ${i + 1}`;
+        needsName = true;
+        console.log('Name extraction failed, using default name:', name);
+      }
+      
       // Don't read the file data yet! Reading large files blocks the UI and IPC bridge.
       // We'll read it right before sending.
+      console.log('Pushing item to array for path:', filePath);
       items.push({
         name,
         path: filePath,
@@ -295,11 +309,13 @@ async function processSelectedPaths(paths: string[]) {
         needsName
       });
     } catch (e) {
-      console.error('Error adding file to selection:', e);
+      console.error(`Error processing file ${filePath}:`, e);
     }
   }
   
+  console.log('Applying items to selectedItems.value, count:', items.length);
   selectedItems.value = items;
+  console.log('selectedItems updated successfully!');
 }
 
 function handleDrop(event: DragEvent) {
