@@ -135,6 +135,8 @@ async function startReceive() {
     result.value = receiveResult;
     isReceiving.value = false;
   } catch (e) {
+    console.error('Receive error:', e);
+    alert('Failed to receive file: ' + String(e));
     error.value = String(e);
     isReceiving.value = false;
   }
