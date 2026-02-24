@@ -16,16 +16,15 @@
     "fs:allow-write-file",
     "fs:allow-mkdir",
     "fs:allow-copy-file",
-    "fs:allow-temp-write",
     "fs:allow-temp-read",
-    {
-      "identifier": "fs:scope",
-      "allow": [
-        "$TEMP/**/*",
-        "$APPCACHE/**/*",
-        "$APPDATA/**/*",
-        "$APPLOCALDATA/**/*"
-      ]
-    }
+    "fs:scope-temp-recursive",
+    "fs:scope-cache-recursive",
+    "fs:scope-appcache-recursive",
+    "fs:scope-appdata-recursive",
+    "fs:scope-applocaldata-recursive",
+    "fs:scope-applog-recursive",
+    "fs:scope-download-recursive",
+    "fs:scope-document-recursive",
+    "fs:scope-home-recursive"
   ]
 }

@@ -114,11 +114,11 @@
 
 <script setup lang="ts">
 import { ref, computed, onMounted, onUnmounted } from 'vue';
-import { invoke } from '@tauri-apps/api/core';
+import { invoke, convertFileSrc } from '@tauri-apps/api/core';
 import { listen, UnlistenFn } from '@tauri-apps/api/event';
-import { open } from '@tauri-apps/plugin-dialog';
-import { basename, tempDir, join } from '@tauri-apps/api/path';
-import { readFile, stat, writeFile, copyFile, mkdir } from '@tauri-apps/plugin-fs';
+import { open as openDialog } from '@tauri-apps/plugin-dialog';
+import { basename, join, appCacheDir } from '@tauri-apps/api/path';
+import { stat, mkdir, BaseDirectory, open as openFile } from '@tauri-apps/plugin-fs';
 
 interface FileInfo {
   name: string;
@@ -247,7 +247,7 @@ async function getFileInfo(filePath: string): Promise<FileInfo | null> {
 async function selectFiles() {
   try {
     // Use native file picker dialog with multiple file support
-    const selected = await open({
+    const selected = await openDialog({
       multiple: true,
       directory: false,
       title: 'Select files to send'
@@ -272,7 +272,7 @@ async function selectFolder() {
   
   try {
     // Use native folder picker dialog
-    const selected = await open({
+    const selected = await openDialog({
       multiple: false,
       directory: true,
       title: 'Select a folder to send'
@@ -394,23 +394,35 @@ async function startSend() {
         path: firstItem.path
       });
     } else if (selectedItems.value.length === 1 && isAndroid && firstItem.path.startsWith('content://')) {
-      // Single Android content URI: cache locally to bypass massive JSON IPC array length errors
-      progress.value.status = 'Reading file...';
-      const rootTemp = await tempDir();
-      const batchDir = await join(rootTemp, 'iron_send_' + Date.now());
-      await mkdir(batchDir);
-      const tempFilePath = await join(batchDir, firstItem.name);
+      progress.value.status = 'Caching file to disk...';
+      const cacheDir = await appCacheDir();
+      const batchDirName = 'iron_send_' + Date.now();
+      await mkdir(batchDirName, { baseDir: BaseDirectory.AppCache });
+      const relativeTempFilePath = `${batchDirName}/${firstItem.name}`;
       
-      try {
-        await copyFile(firstItem.path, tempFilePath);
-      } catch(err) {
-        const fileData = await readFile(firstItem.path);
-        await writeFile(tempFilePath, fileData);
+      const file = await openFile(relativeTempFilePath, { write: true, create: true, baseDir: BaseDirectory.AppCache });
+      const url = convertFileSrc(firstItem.path);
+      const response = await fetch(url);
+      
+      if (response.body) {
+        const reader = response.body.getReader();
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          if (value) {
+            await file.write(value);
+          }
+        }
+      } else {
+        const fallbackBuf = new Uint8Array(await response.arrayBuffer());
+        await file.write(fallbackBuf);
       }
+      await file.close();
       
-      console.log('Using standard start_send with cached path:', tempFilePath);
+      const absoluteTempPath = await join(cacheDir, relativeTempFilePath);
+      console.log('Using standard start_send with cached stream path:', absoluteTempPath);
       result = await invoke<SendResult>('start_send', {
-        path: tempFilePath
+        path: absoluteTempPath
       });
     } else if (selectedItems.value.length === 1) {
       // Single regular file: use path-based send
@@ -422,27 +434,37 @@ async function startSend() {
       // Multiple files
       console.log('Multiple files selected');
       
-      // Check if any of the items is an Android content URI
       const hasContentUri = isAndroid && selectedItems.value.some(item => item.path.startsWith('content://'));
       
       if (hasContentUri) {
         progress.value.status = 'Caching files...';
         const paths = [];
-        const rootTemp = await tempDir();
-        const batchDir = await join(rootTemp, 'iron_send_multi_' + Date.now());
-        await mkdir(batchDir);
+        const cacheDir = await appCacheDir();
+        const batchDirName = 'iron_send_multi_' + Date.now();
+        await mkdir(batchDirName, { baseDir: BaseDirectory.AppCache });
         
         for (const item of selectedItems.value) {
            if (item.path.startsWith('content://')) {
-             progress.value.status = 'Reading ' + item.name;
-             const tempFilePath = await join(batchDir, item.name);
-             try {
-                await copyFile(item.path, tempFilePath);
-             } catch(err) {
-               const fileData = await readFile(item.path);
-               await writeFile(tempFilePath, fileData);
+             progress.value.status = 'Caching ' + item.name;
+             const relativeTempFilePath = `${batchDirName}/${item.name}`;
+             const file = await openFile(relativeTempFilePath, { write: true, create: true, baseDir: BaseDirectory.AppCache });
+             
+             const url = convertFileSrc(item.path);
+             const response = await fetch(url);
+             if (response.body) {
+                const reader = response.body.getReader();
+                while (true) {
+                  const { done, value } = await reader.read();
+                  if (done) break;
+                  if (value) await file.write(value);
+                }
+             } else {
+                const fallbackBuf = new Uint8Array(await response.arrayBuffer());
+                await file.write(fallbackBuf);
              }
-             paths.push(tempFilePath);
+             await file.close();
+             
+             paths.push(await join(cacheDir, relativeTempFilePath));
            } else {
              paths.push(item.path);
            }
