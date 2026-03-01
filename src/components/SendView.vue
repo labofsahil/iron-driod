@@ -114,7 +114,7 @@
 
 <script setup lang="ts">
 import { ref, computed, onMounted, onUnmounted } from 'vue';
-import { invoke, convertFileSrc } from '@tauri-apps/api/core';
+import { invoke } from '@tauri-apps/api/core';
 import { listen, UnlistenFn } from '@tauri-apps/api/event';
 import { open as openDialog } from '@tauri-apps/plugin-dialog';
 import { basename, join, appCacheDir } from '@tauri-apps/api/path';
@@ -376,6 +376,41 @@ function applyCustomName() {
   startSend();
 }
 
+/**
+ * Stream a content:// URI to a local cache file in 1MB chunks.
+ * This avoids loading the entire file into JS memory, which would
+ * exceed V8's array length limit for large files (380MB+).
+ * Returns the absolute path to the cached file.
+ */
+async function cacheContentUri(contentUri: string, fileName: string): Promise<string> {
+  const CHUNK_SIZE = 1024 * 1024; // 1MB chunks - safe for IPC transfer
+  const cacheDir = await appCacheDir();
+  const batchDirName = 'iron_send_' + Date.now();
+  await mkdir(batchDirName, { baseDir: BaseDirectory.AppCache });
+  const relativeFilePath = `${batchDirName}/${fileName}`;
+
+  // Open the content:// URI for reading via plugin-fs (uses Android ContentResolver)
+  const srcFile = await openFile(contentUri, { read: true });
+  // Open local cache file for writing
+  const dstFile = await openFile(relativeFilePath, { write: true, create: true, baseDir: BaseDirectory.AppCache });
+
+  const buf = new Uint8Array(CHUNK_SIZE);
+  let totalWritten = 0;
+  while (true) {
+    const bytesRead = await srcFile.read(buf);
+    if (bytesRead === null) break;
+    const chunk = bytesRead < CHUNK_SIZE ? buf.subarray(0, bytesRead) : buf;
+    await dstFile.write(chunk);
+    totalWritten += bytesRead;
+    progress.value.status = `Caching... ${(totalWritten / (1024 * 1024)).toFixed(0)} MB`;
+  }
+
+  await srcFile.close();
+  await dstFile.close();
+
+  return await join(cacheDir, relativeFilePath);
+}
+
 async function startSend() {
   if (!selectedItems.value.length) return;
 
@@ -394,35 +429,12 @@ async function startSend() {
         path: firstItem.path
       });
     } else if (selectedItems.value.length === 1 && isAndroid && firstItem.path.startsWith('content://')) {
+      // Stream content:// URI to local cache in 1MB chunks to avoid V8 array length limits
       progress.value.status = 'Caching file to disk...';
-      const cacheDir = await appCacheDir();
-      const batchDirName = 'iron_send_' + Date.now();
-      await mkdir(batchDirName, { baseDir: BaseDirectory.AppCache });
-      const relativeTempFilePath = `${batchDirName}/${firstItem.name}`;
-      
-      const file = await openFile(relativeTempFilePath, { write: true, create: true, baseDir: BaseDirectory.AppCache });
-      const url = convertFileSrc(firstItem.path);
-      const response = await fetch(url);
-      
-      if (response.body) {
-        const reader = response.body.getReader();
-        while (true) {
-          const { done, value } = await reader.read();
-          if (done) break;
-          if (value) {
-            await file.write(value);
-          }
-        }
-      } else {
-        const fallbackBuf = new Uint8Array(await response.arrayBuffer());
-        await file.write(fallbackBuf);
-      }
-      await file.close();
-      
-      const absoluteTempPath = await join(cacheDir, relativeTempFilePath);
-      console.log('Using standard start_send with cached stream path:', absoluteTempPath);
+      const cachedPath = await cacheContentUri(firstItem.path, firstItem.name);
+      console.log('Cached content URI to:', cachedPath);
       result = await invoke<SendResult>('start_send', {
-        path: absoluteTempPath
+        path: cachedPath
       });
     } else if (selectedItems.value.length === 1) {
       // Single regular file: use path-based send
@@ -439,32 +451,11 @@ async function startSend() {
       if (hasContentUri) {
         progress.value.status = 'Caching files...';
         const paths = [];
-        const cacheDir = await appCacheDir();
-        const batchDirName = 'iron_send_multi_' + Date.now();
-        await mkdir(batchDirName, { baseDir: BaseDirectory.AppCache });
-        
         for (const item of selectedItems.value) {
            if (item.path.startsWith('content://')) {
              progress.value.status = 'Caching ' + item.name;
-             const relativeTempFilePath = `${batchDirName}/${item.name}`;
-             const file = await openFile(relativeTempFilePath, { write: true, create: true, baseDir: BaseDirectory.AppCache });
-             
-             const url = convertFileSrc(item.path);
-             const response = await fetch(url);
-             if (response.body) {
-                const reader = response.body.getReader();
-                while (true) {
-                  const { done, value } = await reader.read();
-                  if (done) break;
-                  if (value) await file.write(value);
-                }
-             } else {
-                const fallbackBuf = new Uint8Array(await response.arrayBuffer());
-                await file.write(fallbackBuf);
-             }
-             await file.close();
-             
-             paths.push(await join(cacheDir, relativeTempFilePath));
+             const cachedPath = await cacheContentUri(item.path, item.name);
+             paths.push(cachedPath);
            } else {
              paths.push(item.path);
            }
