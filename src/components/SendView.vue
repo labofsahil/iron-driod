@@ -36,8 +36,9 @@
               :placeholder="'Enter filename ' + (index + 1) + ' (e.g., photo.jpg)'"
             />
             <h3 v-else>{{ item.name }}</h3>
-            <p class="text-muted" v-if="item.size > 0">{{ formatFileSize(item.size, 'Calculating...') }}</p>
-            <p class="text-muted" v-else>Ready to send</p>
+            <p class="text-muted" v-if="item.size > 0">{{ formatFileSize(item.size) }}</p>
+            <p class="text-muted" v-else-if="item.loadingMetadata">Calculating...</p>
+            <p class="text-muted" v-else>{{ formatFileSize(item.size) }}</p>
           </div>
         </div>
         

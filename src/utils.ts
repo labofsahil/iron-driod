@@ -51,7 +51,7 @@ export interface SelectedItem {
  * A value of 0 renders as "0.0 B".
  */
 export function formatFileSize(bytes: number, fallback = 'Unknown size'): string {
-  if (bytes == null || Number.isNaN(bytes)) return fallback;
+  if (bytes == null || Number.isNaN(bytes) || bytes < 0) return fallback;
   const units = ['B', 'KB', 'MB', 'GB', 'TB'];
   let i = 0;
   while (bytes >= 1024 && i < units.length - 1) {
