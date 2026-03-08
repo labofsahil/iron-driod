@@ -35,8 +35,9 @@ function setTab(tab: TabType) {
 
     <!-- Main Content -->
     <main class="app-content">
-      <SendView v-if="activeTab === 'send'" />
-      <ReceiveView v-else-if="activeTab === 'receive'" />
+      <KeepAlive>
+        <component :is="activeTab === 'send' ? SendView : ReceiveView" :key="activeTab" />
+      </KeepAlive>
     </main>
 
     <!-- Footer -->

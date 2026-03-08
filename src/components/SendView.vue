@@ -1,8 +1,7 @@
 <template>
   <div class="send-view animate-fadeIn">
     <!-- File Selection Area -->
-    <div v-if="!selectedItems.length" class="dropzone" @dragover.prevent="isDragging = true"
-      @dragleave="isDragging = false" @drop.prevent="handleDrop" :class="{ active: isDragging }">
+    <div v-if="!selectedItems.length" class="dropzone">
       <div class="dropzone-icon">📁</div>
       <h2>Select Files{{ isAndroid ? '' : ' or Folder' }}</h2>
       <p class="text-muted">{{ isAndroid ? 'Choose files to share' : 'Choose files or a folder to share' }}</p>
@@ -29,15 +28,15 @@
         <div v-for="(item, index) in selectedItems" :key="index" class="file-info">
           <div class="file-icon">{{ item.isDir ? '📁' : '📄' }}</div>
           <div class="file-details">
-            <!-- Always show input for files that need naming -->
+            <!-- Show input for files that need naming -->
             <input 
-              v-if="item.needsName || (showNameInput && index === 0)"
+              v-if="item.needsName"
               v-model="item.name"
               class="name-input"
               :placeholder="'Enter filename ' + (index + 1) + ' (e.g., photo.jpg)'"
             />
-            <h3 v-else @click="editFileName(index)">{{ item.name }}</h3>
-            <p class="text-muted" v-if="item.size > 0">{{ formatFileSize(item.size) }}</p>
+            <h3 v-else>{{ item.name }}</h3>
+            <p class="text-muted" v-if="item.size > 0">{{ formatFileSize(item.size, 'Calculating...') }}</p>
             <p class="text-muted" v-else>Ready to send</p>
           </div>
         </div>
@@ -52,7 +51,6 @@
         ✕ Clear
       </button>
 
-
       <!-- Progress Bar (during transfer) -->
       <div v-if="isTransferring" class="progress-container mt-lg">
         <div class="progress-bar">
@@ -65,13 +63,8 @@
       </div>
 
       <!-- Send Button -->
-      <button v-if="!ticket && !isTransferring && !showNameInput" class="btn btn-primary btn-large w-full mt-lg" @click="startSend">
+      <button v-if="!ticket && !isTransferring" class="btn btn-primary btn-large w-full mt-lg" @click="startSend">
         <span>🚀</span> Start Sharing
-      </button>
-      
-      <!-- Confirm Name Button -->
-      <button v-if="showNameInput" class="btn btn-primary btn-large w-full mt-lg" @click="applyCustomName">
-        <span>✓</span> Confirm Name & Share
       </button>
     </div>
 
@@ -84,7 +77,7 @@
 
       <div class="ticket-display">
         <span class="ticket-text">{{ ticket }}</span>
-        <button class="btn btn-secondary btn-icon" @click="copyTicket" :title="copied ? 'Copied!' : 'Copy'">
+        <button class="btn btn-secondary btn-icon" @click="handleCopy" :title="copied ? 'Copied!' : 'Copy'">
           {{ copied ? '✓' : '📋' }}
         </button>
       </div>
@@ -119,75 +112,44 @@ import { listen, UnlistenFn } from '@tauri-apps/api/event';
 import { open as openDialog } from '@tauri-apps/plugin-dialog';
 import { basename, join, appCacheDir } from '@tauri-apps/api/path';
 import { stat, mkdir, BaseDirectory, open as openFile } from '@tauri-apps/plugin-fs';
-
-interface FileInfo {
-  name: string;
-  size: number;
-}
-
-interface TransferProgress {
-  status: string;
-  bytes_transferred: number;
-  total_bytes: number;
-  percent: number;
-}
-
-interface SendResult {
-  ticket: string;
-  file_name: string;
-  file_size: number;
-}
-
-interface SelectedItem {
-  name: string;
-  path: string;
-  size: number;
-  isDir: boolean;
-  needsName?: boolean;
-  data?: Uint8Array;
-}
+import {
+  type TransferProgress,
+  type SendResult,
+  type FileInfo,
+  type SelectedItem,
+  formatFileSize,
+  copyToClipboard,
+  defaultProgress,
+  isAndroid,
+} from '../utils';
 
 const selectedItems = ref<SelectedItem[]>([]);
-const isDragging = ref(false);
 const isTransferring = ref(false);
 const ticket = ref<string | null>(null);
 const copied = ref(false);
 const error = ref<string | null>(null);
-const progress = ref<TransferProgress>({
-  status: 'Initializing...',
-  bytes_transferred: 0,
-  total_bytes: 0,
-  percent: 0
-});
-const showNameInput = ref(false);
-const customFileName = ref('');
-
-// Detect if running on Android
-const isAndroid = /android/i.test(navigator.userAgent);
+const progress = ref<TransferProgress>(defaultProgress());
 
 // Check if any files need naming
 const needsNaming = computed(() => selectedItems.value.some(item => item.needsName));
-
 const totalSize = computed(() => selectedItems.value.reduce((sum, item) => sum + item.size, 0));
 
 let unlisten: UnlistenFn | null = null;
 
 onMounted(async () => {
-  // Listen for transfer progress events
-  unlisten = await listen<TransferProgress>('transfer-progress', (event) => {
+  // Listen for send-specific progress events (avoids collision with ReceiveView)
+  unlisten = await listen<TransferProgress>('send-progress', (event) => {
     progress.value = event.payload;
   });
 });
 
 onUnmounted(() => {
-  if (unlisten) {
-    unlisten();
-  }
+  unlisten?.();
 });
 
 /**
- * Get file info using backend Rust command
- * Fast and doesn't freeze UI
+ * Get file info using backend Rust command.
+ * Falls back to path parsing + Tauri stat for Android content:// URIs.
  */
 async function getFileInfo(filePath: string): Promise<FileInfo | null> {
   let name = "";
@@ -196,8 +158,7 @@ async function getFileInfo(filePath: string): Promise<FileInfo | null> {
   try {
     // Rust backend get_file_info only works for standard file paths (not content://)
     if (!filePath.startsWith('content://')) {
-      const info = await invoke<FileInfo>('get_file_info', { path: filePath });
-      return info;
+      return await invoke<FileInfo>('get_file_info', { path: filePath });
     }
   } catch (e) {
     console.error('Failed to get file info from Rust:', e);
@@ -221,7 +182,6 @@ async function getFileInfo(filePath: string): Promise<FileInfo | null> {
       // If decoding fails, use as-is
     }
     
-    // Regular file path - extract filename
     const parts = decoded.split(/[/\\]/);
     const extracted = parts[parts.length - 1];
     if (extracted && !extracted.startsWith('content:')) {
@@ -237,16 +197,11 @@ async function getFileInfo(filePath: string): Promise<FileInfo | null> {
     console.warn('Could not stat file size:', e);
   }
 
-  if (name) {
-    return { name, size };
-  }
-  
-  return null;
+  return name ? { name, size } : null;
 }
 
 async function selectFiles() {
   try {
-    // Use native file picker dialog with multiple file support
     const selected = await openDialog({
       multiple: true,
       directory: false,
@@ -264,14 +219,12 @@ async function selectFiles() {
 }
 
 async function selectFolder() {
-  // Folder selection is not well-supported on Android
   if (isAndroid) {
     error.value = 'Folder selection is not supported on Android. Please select individual files.';
     return;
   }
   
   try {
-    // Use native folder picker dialog
     const selected = await openDialog({
       multiple: false,
       directory: true,
@@ -283,11 +236,10 @@ async function selectFolder() {
       const info = await getFileInfo(folderPath);
       const name = info?.name || 'folder';
       
-      // For folders, we don't read the data here - the backend handles it
       selectedItems.value = [{
         name,
         path: folderPath,
-        size: info?.size || 0, // Got exact size from backend
+        size: info?.size || 0,
         isDir: true
       }];
     }
@@ -298,10 +250,8 @@ async function selectFolder() {
 }
 
 async function processSelectedPaths(paths: string[]) {
-  // 1. Immediately push all files to UI with a "needsName" placeholder or basic info
-  // This prevents the UI from freezing on Android when trying to select multiple heavy files
+  // Immediately show files in UI with placeholder names for instant feedback
   const items: SelectedItem[] = paths.map((filePath, i) => {
-    // Try to get a basic name from path string if possible (for immediate feedback)
     let tempName = `File ${i + 1}`;
     try {
       const decoded = decodeURIComponent(filePath);
@@ -315,7 +265,7 @@ async function processSelectedPaths(paths: string[]) {
     return {
       name: tempName,
       path: filePath,
-      size: 0, // Placeholder size (will show Calculating... in UI)
+      size: 0,
       isDir: false,
       needsName: false,
     };
@@ -323,7 +273,7 @@ async function processSelectedPaths(paths: string[]) {
   
   selectedItems.value = items;
 
-  // 2. Fetch the proper file info (size and precise names) asynchronously without blocking UI
+  // Fetch proper file info asynchronously without blocking UI
   for (let i = 0; i < selectedItems.value.length; i++) {
     const item = selectedItems.value[i];
     
@@ -343,55 +293,25 @@ async function processSelectedPaths(paths: string[]) {
   }
 }
 
-function handleDrop(event: DragEvent) {
-  isDragging.value = false;
-  // Handle dropped files - requires additional Tauri setup for mobile
-  const files = event.dataTransfer?.files;
-  if (files && files.length > 0) {
-    console.log('Dropped files:', files);
-  }
-}
-
 function clearSelection() {
   selectedItems.value = [];
   ticket.value = null;
   error.value = null;
-  showNameInput.value = false;
-  customFileName.value = '';
-}
-
-function editFileName(index: number) {
-  if (index === 0 && selectedItems.value.length === 1) {
-    customFileName.value = selectedItems.value[0].name;
-    showNameInput.value = true;
-  }
-}
-
-function applyCustomName() {
-  if (customFileName.value.trim() && selectedItems.value.length > 0) {
-    selectedItems.value[0].name = customFileName.value.trim();
-  }
-  showNameInput.value = false;
-  // Auto-start send after confirming the name
-  startSend();
 }
 
 /**
  * Stream a content:// URI to a local cache file in 1MB chunks.
- * This avoids loading the entire file into JS memory, which would
- * exceed V8's array length limit for large files (380MB+).
+ * Avoids loading the entire file into JS memory (V8 array length limit).
  * Returns the absolute path to the cached file.
  */
 async function cacheContentUri(contentUri: string, fileName: string): Promise<string> {
-  const CHUNK_SIZE = 1024 * 1024; // 1MB chunks - safe for IPC transfer
+  const CHUNK_SIZE = 1024 * 1024; // 1MB chunks
   const cacheDir = await appCacheDir();
   const batchDirName = 'iron_send_' + Date.now();
   await mkdir(batchDirName, { baseDir: BaseDirectory.AppCache });
   const relativeFilePath = `${batchDirName}/${fileName}`;
 
-  // Open the content:// URI for reading via plugin-fs (uses Android ContentResolver)
   const srcFile = await openFile(contentUri, { read: true });
-  // Open local cache file for writing
   const dstFile = await openFile(relativeFilePath, { write: true, create: true, baseDir: BaseDirectory.AppCache });
 
   const buf = new Uint8Array(CHUNK_SIZE);
@@ -421,31 +341,19 @@ async function startSend() {
     let result: SendResult;
     const firstItem = selectedItems.value[0];
     
-    // Check if this is a folder or if we have multiple items
     if (firstItem.isDir) {
       // Folder: use path-based send
-      console.log('Sending folder:', firstItem.path);
-      result = await invoke<SendResult>('start_send', {
-        path: firstItem.path
-      });
+      result = await invoke<SendResult>('start_send', { path: firstItem.path });
     } else if (selectedItems.value.length === 1 && isAndroid && firstItem.path.startsWith('content://')) {
-      // Stream content:// URI to local cache in 1MB chunks to avoid V8 array length limits
+      // Stream content:// URI to local cache first
       progress.value.status = 'Caching file to disk...';
       const cachedPath = await cacheContentUri(firstItem.path, firstItem.name);
-      console.log('Cached content URI to:', cachedPath);
-      result = await invoke<SendResult>('start_send', {
-        path: cachedPath
-      });
+      result = await invoke<SendResult>('start_send', { path: cachedPath });
     } else if (selectedItems.value.length === 1) {
-      // Single regular file: use path-based send
-      console.log('Using start_send with path:', firstItem.path);
-      result = await invoke<SendResult>('start_send', {
-        path: firstItem.path
-      });
+      // Single regular file
+      result = await invoke<SendResult>('start_send', { path: firstItem.path });
     } else {
       // Multiple files
-      console.log('Multiple files selected');
-      
       const hasContentUri = isAndroid && selectedItems.value.some(item => item.path.startsWith('content://'));
       
       if (hasContentUri) {
@@ -462,25 +370,17 @@ async function startSend() {
         }
         
         progress.value.status = 'Starting transfer...';
-        result = await invoke<SendResult>('start_send_multiple', {
-          paths: paths
-        });
+        result = await invoke<SendResult>('start_send_multiple', { paths });
       } else {
-        // Desktop or non-content paths: send the array of string paths directly
         const paths = selectedItems.value.map(item => item.path);
-        console.log('Calling start_send_multiple with paths:', paths);
-        result = await invoke<SendResult>('start_send_multiple', {
-          paths: paths
-        });
+        result = await invoke<SendResult>('start_send_multiple', { paths });
       }
     }
 
-    console.log('Send completed successfully. Ticket:', result.ticket);
     ticket.value = result.ticket;
     isTransferring.value = false;
   } catch (e) {
     console.error('Send error:', e);
-    alert('Failed to send files: ' + String(e));
     error.value = String(e);
     isTransferring.value = false;
   }
@@ -496,17 +396,12 @@ async function cancelSend() {
   }
 }
 
-async function copyTicket() {
+async function handleCopy() {
   if (!ticket.value) return;
-
-  try {
-    await navigator.clipboard.writeText(ticket.value);
+  const ok = await copyToClipboard(ticket.value);
+  if (ok) {
     copied.value = true;
-    setTimeout(() => {
-      copied.value = false;
-    }, 2000);
-  } catch (e) {
-    console.error('Copy error:', e);
+    setTimeout(() => { copied.value = false; }, 2000);
   }
 }
 
@@ -515,17 +410,6 @@ function resetState() {
   ticket.value = null;
   error.value = null;
   isTransferring.value = false;
-}
-
-function formatFileSize(bytes: number): string {
-  if (bytes === 0) return 'Calculating...';
-  const units = ['B', 'KB', 'MB', 'GB', 'TB'];
-  let i = 0;
-  while (bytes >= 1024 && i < units.length - 1) {
-    bytes /= 1024;
-    i++;
-  }
-  return `${bytes.toFixed(1)} ${units[i]}`;
 }
 </script>
 
@@ -621,18 +505,6 @@ function formatFileSize(bytes: number): string {
   outline: none;
   border-color: var(--accent-secondary);
   box-shadow: 0 0 0 2px rgba(var(--accent-primary-rgb), 0.2);
-}
-
-.file-details h3 {
-  cursor: pointer;
-}
-
-.file-details h3:hover {
-  color: var(--accent-primary);
-}
-
-.text-small {
-  font-size: 0.8rem;
 }
 
 .naming-notice {

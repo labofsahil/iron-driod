@@ -21,6 +21,8 @@ use tokio::sync::Mutex;
 use tracing::{info, error};
 use walkdir::WalkDir;
 
+// ─── Public Types ────────────────────────────────────────────────
+
 /// Transfer progress event sent to the frontend
 #[derive(Clone, Serialize, Deserialize)]
 pub struct TransferProgress {
@@ -46,6 +48,15 @@ pub struct ReceiveResult {
     pub file_size: u64,
 }
 
+/// File info result
+#[derive(Clone, Serialize, Deserialize)]
+pub struct FileInfo {
+    pub name: String,
+    pub size: u64,
+}
+
+// ─── Internal Types ──────────────────────────────────────────────
+
 /// Active send session state
 pub struct SendSession {
     router: Router,
@@ -55,19 +66,6 @@ pub struct SendSession {
 /// Global state for managing active sessions
 pub struct SendmeState {
     active_send: Mutex<Option<SendSession>>,
-}
-
-/// File info result
-#[derive(Clone, Serialize, Deserialize)]
-pub struct FileInfo {
-    pub name: String,
-    pub size: u64,
-}
-
-#[derive(Clone, Deserialize)]
-pub struct FileDataPayload {
-    pub file_name: String,
-    pub data: Vec<u8>,
 }
 
 impl SendmeState {
@@ -83,6 +81,8 @@ impl Default for SendmeState {
         Self::new()
     }
 }
+
+// ─── Helpers ─────────────────────────────────────────────────────
 
 /// Calculate total size of a path (file or directory)
 fn calculate_size(path: &Path) -> Result<u64> {
@@ -106,6 +106,77 @@ fn get_name(path: &Path) -> String {
         .unwrap_or_else(|| "unknown".to_string())
 }
 
+/// Emit a progress event to the frontend.
+fn emit_progress(app: &AppHandle, event_name: &str, status: &str, bytes: u64, total: u64, percent: f32) {
+    let _ = app.emit(event_name, TransferProgress {
+        status: status.to_string(),
+        bytes_transferred: bytes,
+        total_bytes: total,
+        percent,
+    });
+}
+
+/// Shared boilerplate: create temp dir → endpoint → store → blobs protocol → import collection → spawn router → generate ticket.
+/// Returns the running `SendSession` and the ticket string.
+async fn create_send_session(
+    app: &AppHandle,
+    event_name: &str,
+    collection: Collection,
+    total_size: u64,
+) -> Result<(SendSession, String)> {
+    // Create temporary directory for blob storage
+    let temp_dir = tempfile::Builder::new()
+        .prefix(".iron-send-")
+        .tempdir()
+        .context("Failed to create temp directory")?;
+
+    // Initialize iroh endpoint
+    let endpoint = Endpoint::builder()
+        .relay_mode(RelayMode::Default)
+        .bind()
+        .await
+        .context("Failed to create iroh endpoint")?;
+
+    emit_progress(app, event_name, "Setting up connection...", 0, total_size, 10.0);
+
+    // Create blob store using FsStore + BlobsProtocol
+    let store = FsStore::load(temp_dir.path())
+        .await
+        .context("Failed to create blob store")?;
+    let blobs = BlobsProtocol::new(&store, None);
+
+    // Store the collection to get its root hash
+    let collection_tag = collection.store(store.as_ref())
+        .await
+        .context("Failed to store collection")?;
+    let collection_hash = collection_tag.hash();
+
+    emit_progress(app, event_name, "Starting server...", total_size, total_size, 60.0);
+
+    // Spawn router and wait for relay connection
+    let router = Router::builder(endpoint)
+        .accept(iroh_blobs::ALPN, blobs)
+        .spawn();
+    router.endpoint().online().await;
+
+    emit_progress(app, event_name, "Generating ticket...", total_size, total_size, 80.0);
+
+    // Generate ticket (HashSeq format for collections)
+    let ticket = BlobTicket::new(router.endpoint().addr(), collection_hash, BlobFormat::HashSeq);
+    let ticket_string = ticket.to_string();
+
+    emit_progress(app, event_name, "Ready to send", total_size, total_size, 100.0);
+
+    let session = SendSession {
+        router,
+        _temp_dir: temp_dir,
+    };
+
+    Ok((session, ticket_string))
+}
+
+// ─── Public API ──────────────────────────────────────────────────
+
 /// Get basic file info (name and size) efficiently without reading contents
 pub async fn get_file_info(path: String) -> Result<FileInfo> {
     let p = PathBuf::from(&path);
@@ -119,17 +190,17 @@ pub async fn get_file_info(path: String) -> Result<FileInfo> {
     Ok(FileInfo { name, size })
 }
 
-/// Start sending a file or directory
-/// Creates a Collection with proper filenames that receivers can extract
+/// Start sending a file or directory.
+/// Creates a Collection with proper filenames that receivers can extract.
 pub async fn start_send(
     state: &SendmeState,
     path: String,
     app: AppHandle,
 ) -> Result<SendResult> {
+    const EVENT: &str = "send-progress";
     info!("start_send called with path: {}", path);
     
     let path = PathBuf::from(&path);
-    
     if !path.exists() {
         error!("Path does not exist: {}", path.display());
         return Err(anyhow!("Path does not exist: {}", path.display()));
@@ -139,69 +210,28 @@ pub async fn start_send(
     let file_size = calculate_size(&path)?;
     info!("File: {} Size: {} bytes", file_name, file_size);
 
-    // Emit initial progress
-    let _ = app.emit("transfer-progress", TransferProgress {
-        status: "Initializing...".to_string(),
-        bytes_transferred: 0,
-        total_bytes: file_size,
-        percent: 0.0,
-    });
+    emit_progress(&app, EVENT, "Initializing...", 0, file_size, 0.0);
 
-    // Create temporary directory for blob storage
+    // Create a temporary store to import file data
     let temp_dir = tempfile::Builder::new()
-        .prefix(".iron-send-")
+        .prefix(".iron-send-import-")
         .tempdir()
         .context("Failed to create temp directory")?;
-    info!("Created temp dir: {:?}", temp_dir.path());
-
-    // Initialize iroh endpoint
-    info!("Creating iroh endpoint...");
-    let endpoint = Endpoint::builder()
-        .relay_mode(RelayMode::Default)
-        .bind()
-        .await
-        .context("Failed to create iroh endpoint")?;
-    info!("Endpoint created successfully");
-
-    // Emit progress
-    let _ = app.emit("transfer-progress", TransferProgress {
-        status: "Setting up connection...".to_string(),
-        bytes_transferred: 0,
-        total_bytes: file_size,
-        percent: 10.0,
-    });
-
-    // Create blob store using FsStore + BlobsProtocol
-    info!("Creating blob store...");
     let store = FsStore::load(temp_dir.path())
         .await
         .context("Failed to create blob store")?;
-    let blobs = BlobsProtocol::new(&store, None);
-    info!("Blob store created");
-
-    // Emit progress
-    let _ = app.emit("transfer-progress", TransferProgress {
-        status: "Importing files...".to_string(),
-        bytes_transferred: 0,
-        total_bytes: file_size,
-        percent: 20.0,
-    });
-
-    // Get the client for operations
     let client = store.blobs();
 
-    // Create a Collection with proper filenames
+    emit_progress(&app, EVENT, "Importing files...", 0, file_size, 20.0);
+
+    // Build collection
     let mut collection = Collection::default();
     
     if path.is_file() {
-        // Single file: add to collection with its name
         info!("Importing single file: {}", file_name);
-        let progress = client.add_path(&path);
-        let add_outcome = progress.await.context("Failed to add file")?;
-        info!("Added file to store, hash: {}", add_outcome.hash);
+        let add_outcome = client.add_path(&path).await.context("Failed to add file")?;
         collection.push(file_name.clone(), add_outcome.hash);
     } else {
-        // Directory: recursively add all files with relative paths
         info!("Importing directory: {}", path.display());
         let base_path = path.canonicalize().context("Failed to canonicalize path")?;
         
@@ -215,9 +245,7 @@ pub async fn start_send(
                     .to_string();
                 
                 info!("Importing: {} -> {}", file_path.display(), relative_path);
-                let progress = client.add_path(file_path);
-                let add_outcome = progress.await.context("Failed to add file")?;
-                info!("Added file, hash: {}", add_outcome.hash);
+                let add_outcome = client.add_path(file_path).await.context("Failed to add file")?;
                 collection.push(relative_path, add_outcome.hash);
             }
         }
@@ -225,56 +253,37 @@ pub async fn start_send(
     
     info!("Collection has {} entries", collection.len());
 
-    // Store the collection to get its root hash
-    info!("Storing collection...");
+    // Use shared helper to create session and generate ticket
+    // NOTE: We need to re-create the store/blobs since the helper builds its own.
+    // For single send we use the temp_dir we already populated.
+    emit_progress(&app, EVENT, "Storing collection...", 0, file_size, 40.0);
+
     let collection_tag = collection.store(store.as_ref())
         .await
         .context("Failed to store collection")?;
     let collection_hash = collection_tag.hash();
-    info!("Collection stored, hash: {}", collection_hash);
 
-    // Emit progress
-    let _ = app.emit("transfer-progress", TransferProgress {
-        status: "Starting server...".to_string(),
-        bytes_transferred: file_size,
-        total_bytes: file_size,
-        percent: 60.0,
-    });
+    emit_progress(&app, EVENT, "Starting server...", file_size, file_size, 60.0);
 
-    // Build router with blobs protocol - this starts serving the blobs
-    info!("Spawning router...");
+    let blobs = BlobsProtocol::new(&store, None);
+    let endpoint = Endpoint::builder()
+        .relay_mode(RelayMode::Default)
+        .bind()
+        .await
+        .context("Failed to create iroh endpoint")?;
+
     let router = Router::builder(endpoint)
         .accept(iroh_blobs::ALPN, blobs)
         .spawn();
-    info!("Router spawned");
-
-    // Wait for the endpoint to be online (connected to relay)
-    info!("Waiting for relay connection...");
     router.endpoint().online().await;
-    info!("Connected to relay!");
 
-    // Emit progress
-    let _ = app.emit("transfer-progress", TransferProgress {
-        status: "Generating ticket...".to_string(),
-        bytes_transferred: file_size,
-        total_bytes: file_size,
-        percent: 80.0,
-    });
+    emit_progress(&app, EVENT, "Generating ticket...", file_size, file_size, 80.0);
 
-    // Generate ticket with the endpoint address - use HashSeq format for collections
-    let addr = router.endpoint().addr();
-    info!("Endpoint address: {:?}", addr);
-    let ticket = BlobTicket::new(addr, collection_hash, BlobFormat::HashSeq);
+    let ticket = BlobTicket::new(router.endpoint().addr(), collection_hash, BlobFormat::HashSeq);
     let ticket_string = ticket.to_string();
     info!("Generated ticket: {}", &ticket_string[..50.min(ticket_string.len())]);
 
-    // Emit complete
-    let _ = app.emit("transfer-progress", TransferProgress {
-        status: "Ready to send".to_string(),
-        bytes_transferred: file_size,
-        total_bytes: file_size,
-        percent: 100.0,
-    });
+    emit_progress(&app, EVENT, "Ready to send", file_size, file_size, 100.0);
 
     // Store active session
     let mut active = state.active_send.lock().await;
@@ -291,139 +300,109 @@ pub async fn start_send(
     })
 }
 
-/// Start sending from raw bytes (for Android content:// URIs)
-pub async fn start_send_bytes(
+/// Start sending multiple files by path
+pub async fn start_send_multiple(
     state: &SendmeState,
-    file_name: String,
-    data: Vec<u8>,
+    paths: Vec<String>,
     app: AppHandle,
 ) -> Result<SendResult> {
-    let file_size = data.len() as u64;
-    info!("start_send_bytes called - file: {}, size: {} bytes", file_name, file_size);
+    const EVENT: &str = "send-progress";
+    info!("start_send_multiple called with {} paths", paths.len());
+    
+    if paths.is_empty() {
+        return Err(anyhow!("No paths provided"));
+    }
 
-    // Emit initial progress
-    let _ = app.emit("transfer-progress", TransferProgress {
-        status: "Initializing...".to_string(),
-        bytes_transferred: 0,
-        total_bytes: file_size,
-        percent: 0.0,
-    });
+    // Validate paths and calculate total size
+    let mut total_size = 0u64;
+    for path_str in &paths {
+        let path = PathBuf::from(path_str);
+        if path.exists() {
+            total_size += calculate_size(&path)?;
+        } else {
+            return Err(anyhow!("Path does not exist: {}", path.display()));
+        }
+    }
 
-    // Create temporary directory for blob storage
+    let first_file_name = get_name(&PathBuf::from(&paths[0]));
+    let display_name = if paths.len() == 1 { first_file_name } else { format!("{} items", paths.len()) };
+
+    emit_progress(&app, EVENT, "Initializing...", 0, total_size, 0.0);
+
     let temp_dir = tempfile::Builder::new()
         .prefix(".iron-send-")
         .tempdir()
         .context("Failed to create temp directory")?;
-    info!("Created temp dir: {:?}", temp_dir.path());
-
-    // Initialize iroh endpoint
-    info!("Creating iroh endpoint...");
     let endpoint = Endpoint::builder()
         .relay_mode(RelayMode::Default)
         .bind()
         .await
-        .context("Failed to create iroh endpoint")?;
-    info!("Endpoint created successfully");
+        .context("Failed to create endpoint")?;
 
-    // Emit progress
-    let _ = app.emit("transfer-progress", TransferProgress {
-        status: "Setting up connection...".to_string(),
-        bytes_transferred: 0,
-        total_bytes: file_size,
-        percent: 10.0,
-    });
+    emit_progress(&app, EVENT, "Setting up connection...", 0, total_size, 10.0);
 
-    // Create blob store using FsStore + BlobsProtocol
-    info!("Creating blob store...");
     let store = FsStore::load(temp_dir.path())
         .await
-        .context("Failed to create blob store")?;
+        .context("Failed to load store")?;
     let blobs = BlobsProtocol::new(&store, None);
-    info!("Blob store created");
-
-    // Emit progress
-    let _ = app.emit("transfer-progress", TransferProgress {
-        status: "Importing file...".to_string(),
-        bytes_transferred: 0,
-        total_bytes: file_size,
-        percent: 20.0,
-    });
-
-    // Get the client for operations
     let client = store.blobs();
 
-    // Add bytes directly to store and create Collection with filename
-    info!("Adding {} bytes to store...", data.len());
-    let add_outcome = client.add_bytes(data).await.context("Failed to add bytes")?;
-    info!("Added bytes to store, hash: {}", add_outcome.hash);
-    
-    // Create a Collection with the filename
+    emit_progress(&app, EVENT, "Importing files...", 0, total_size, 20.0);
+
+    // Build collection from all paths
     let mut collection = Collection::default();
-    collection.push(file_name.clone(), add_outcome.hash);
     
-    // Store the collection to get its root hash
-    info!("Storing collection...");
+    for path_str in paths {
+        let path = PathBuf::from(&path_str);
+        if path.is_file() {
+            let file_name = get_name(&path);
+            let add_outcome = client.add_path(&path).await.context("Failed to add file")?;
+            collection.push(file_name, add_outcome.hash);
+        } else {
+            let base_path = path.canonicalize().context("Failed to canonicalize path")?;
+            let folder_name = get_name(&path);
+            for entry in WalkDir::new(&path).into_iter().filter_map(|e| e.ok()) {
+                if entry.file_type().is_file() {
+                    let file_path = entry.path();
+                    let relative = file_path
+                        .strip_prefix(&base_path)
+                        .unwrap_or(file_path)
+                        .to_string_lossy()
+                        .to_string();
+                    let relative_path = format!("{}/{}", folder_name, relative);
+                    let add_outcome = client.add_path(file_path).await.context("Failed to add file")?;
+                    collection.push(relative_path, add_outcome.hash);
+                }
+            }
+        }
+    }
+
     let collection_tag = collection.store(store.as_ref())
         .await
         .context("Failed to store collection")?;
     let collection_hash = collection_tag.hash();
-    info!("Collection stored, hash: {}", collection_hash);
 
-    // Emit progress
-    let _ = app.emit("transfer-progress", TransferProgress {
-        status: "Starting server...".to_string(),
-        bytes_transferred: file_size,
-        total_bytes: file_size,
-        percent: 60.0,
-    });
+    emit_progress(&app, EVENT, "Starting server...", total_size, total_size, 60.0);
 
-    // Build router with blobs protocol - this starts serving the blobs
-    info!("Spawning router...");
     let router = Router::builder(endpoint)
         .accept(iroh_blobs::ALPN, blobs)
         .spawn();
-    info!("Router spawned");
-
-    // Wait for the endpoint to be online (connected to relay)
-    info!("Waiting for relay connection...");
     router.endpoint().online().await;
-    info!("Connected to relay!");
 
-    // Emit progress
-    let _ = app.emit("transfer-progress", TransferProgress {
-        status: "Generating ticket...".to_string(),
-        bytes_transferred: file_size,
-        total_bytes: file_size,
-        percent: 80.0,
-    });
+    emit_progress(&app, EVENT, "Generating ticket...", total_size, total_size, 80.0);
 
-    // Generate ticket with the endpoint address - use HashSeq format for collections
-    let addr = router.endpoint().addr();
-    info!("Endpoint address: {:?}", addr);
-    let ticket = BlobTicket::new(addr, collection_hash, BlobFormat::HashSeq);
+    let ticket = BlobTicket::new(router.endpoint().addr(), collection_hash, BlobFormat::HashSeq);
     let ticket_string = ticket.to_string();
-    info!("Generated ticket: {}", &ticket_string[..50.min(ticket_string.len())]);
 
-    // Emit complete
-    let _ = app.emit("transfer-progress", TransferProgress {
-        status: "Ready to send".to_string(),
-        bytes_transferred: file_size,
-        total_bytes: file_size,
-        percent: 100.0,
-    });
+    emit_progress(&app, EVENT, "Ready to send", total_size, total_size, 100.0);
 
-    // Store active session
     let mut active = state.active_send.lock().await;
-    *active = Some(SendSession {
-        router,
-        _temp_dir: temp_dir,
-    });
+    *active = Some(SendSession { router, _temp_dir: temp_dir });
 
-    info!("Send session ready!");
     Ok(SendResult {
         ticket: ticket_string,
-        file_name,
-        file_size,
+        file_name: display_name,
+        file_size: total_size,
     })
 }
 
@@ -432,10 +411,8 @@ pub async fn cancel_send(state: &SendmeState) -> Result<()> {
     info!("Cancelling send session...");
     let mut active = state.active_send.lock().await;
     if let Some(session) = active.take() {
-        // Shutdown the router gracefully
         session.router.shutdown().await?;
         info!("Send session cancelled");
-        // temp_dir is automatically cleaned up when dropped
     }
     Ok(())
 }
@@ -446,6 +423,7 @@ pub async fn receive_file(
     output_dir: String,
     app: AppHandle,
 ) -> Result<ReceiveResult> {
+    const EVENT: &str = "receive-progress";
     info!("receive_file called with ticket length: {}", ticket_string.len());
     info!("Output dir: {}", output_dir);
 
@@ -462,118 +440,74 @@ pub async fn receive_file(
             .context("Failed to create output directory")?;
     }
 
-    // Emit initial progress
-    let _ = app.emit("transfer-progress", TransferProgress {
-        status: "Connecting to sender...".to_string(),
-        bytes_transferred: 0,
-        total_bytes: 0,
-        percent: 0.0,
-    });
+    emit_progress(&app, EVENT, "Connecting to sender...", 0, 0, 0.0);
 
     // Create temporary directory for receiving
     let temp_dir = tempfile::Builder::new()
         .prefix(".iron-recv-")
         .tempdir()
         .context("Failed to create temp directory")?;
-    info!("Created temp dir: {:?}", temp_dir.path());
 
     // Initialize iroh endpoint for client
-    info!("Creating iroh endpoint...");
     let endpoint = Endpoint::builder()
         .relay_mode(RelayMode::Default)
         .bind()
         .await
         .context("Failed to create iroh endpoint")?;
-    info!("Endpoint created");
 
     // Create blob store
-    info!("Creating blob store...");
     let store = FsStore::load(temp_dir.path())
         .await
         .context("Failed to create blob store")?;
     let blobs = BlobsProtocol::new(&store, None);
-    info!("Blob store created");
 
-    // Emit progress
-    let _ = app.emit("transfer-progress", TransferProgress {
-        status: "Establishing connection...".to_string(),
-        bytes_transferred: 0,
-        total_bytes: 0,
-        percent: 10.0,
-    });
+    emit_progress(&app, EVENT, "Establishing connection...", 0, 0, 10.0);
 
     // Spawn the router so we can receive data via the protocol
-    info!("Spawning router...");
     let router = Router::builder(endpoint.clone())
         .accept(iroh_blobs::ALPN, blobs)
         .spawn();
-    info!("Router spawned");
-
-    // Wait for endpoint to be online
-    info!("Waiting for relay connection...");
     router.endpoint().online().await;
-    info!("Connected to relay!");
 
-    // Emit progress
-    let _ = app.emit("transfer-progress", TransferProgress {
-        status: "Connecting to peer...".to_string(),
-        bytes_transferred: 0,
-        total_bytes: 0,
-        percent: 20.0,
-    });
+    emit_progress(&app, EVENT, "Connecting to peer...", 0, 0, 20.0);
 
     // Get hash, format, and node address from ticket
     let hash = ticket.hash();
     let format = ticket.format();
     let (node_addr, _, _) = ticket.into_parts();
-    info!("Attempting to download from node: {:?}, format: {:?}", node_addr, format);
 
     // Use the client to download
     let client = store.blobs();
 
-    // Download the blob
-    let _ = app.emit("transfer-progress", TransferProgress {
-        status: "Downloading...".to_string(),
-        bytes_transferred: 0,
-        total_bytes: 0,
-        percent: 30.0,
-    });
+    emit_progress(&app, EVENT, "Downloading...", 0, 0, 30.0);
 
-    // Start the download using Downloader with proper request based on format
-    info!("Starting download...");
+    // Start the download using Downloader
     let downloader = Downloader::new(&store, router.endpoint());
-    
-    // Create the appropriate request based on blob format
     let request = match format {
         BlobFormat::Raw => GetRequest::blob(hash),
         BlobFormat::HashSeq => GetRequest::all(hash),
     };
     
-    // Start the download and await its completion
-    let download_progress = downloader.download(request, [node_addr.id]);
-    download_progress.await.context("Download failed")?;
+    downloader.download(request, [node_addr.id])
+        .await
+        .context("Download failed")?;
     info!("Download complete!");
 
     // Export files based on format
     match format {
         BlobFormat::HashSeq => {
-            // For HashSeq (collection), load the collection manifest to get filenames
             info!("Loading collection manifest...");
-            // Use store as reference - FsStore implements Deref to Store which implements SimpleStore
             let collection = Collection::load(hash, store.as_ref())
                 .await
                 .context("Failed to load collection")?;
-            
             info!("Collection has {} files", collection.len());
             
-            // Export each file in the collection
             let mut total_size = 0u64;
             let mut file_names = Vec::new();
             for (name, blob_hash) in collection.iter() {
                 info!("Exporting: {} (hash: {})", name, blob_hash);
                 let file_path = output_path.join(name);
                 
-                // Create parent directories if needed
                 if let Some(parent) = file_path.parent() {
                     std::fs::create_dir_all(parent).ok();
                 }
@@ -588,9 +522,6 @@ pub async fn receive_file(
                 file_names.push(name.to_string());
             }
             
-            info!("Export complete! Total size: {} bytes", total_size);
-            
-            // Get the proper filename for the result to display in UI
             let file_name = if file_names.len() == 1 {
                 file_names.first().cloned().unwrap_or_else(|| format!("received_{}", &hash.to_string()[..8]))
             } else {
@@ -603,16 +534,8 @@ pub async fn receive_file(
                 output_path.to_path_buf()
             };
             
-            // Emit complete
-            let _ = app.emit("transfer-progress", TransferProgress {
-                status: "Complete".to_string(),
-                bytes_transferred: total_size,
-                total_bytes: total_size,
-                percent: 100.0,
-            });
-            
-            // Cleanup - shutdown router
-            info!("Shutting down router...");
+            emit_progress(&app, EVENT, "Complete", total_size, total_size, 100.0);
+
             router.shutdown().await?;
             info!("Receive complete!");
             
@@ -623,10 +546,8 @@ pub async fn receive_file(
             })
         }
         BlobFormat::Raw => {
-            // For raw blobs, use hash-based name
             let file_name = format!("received_{}", &hash.to_string()[..8]);
             let final_path = output_path.join(&file_name);
-            info!("Exporting to: {:?}", final_path);
             
             client
                 .export(hash, &final_path)
@@ -636,18 +557,9 @@ pub async fn receive_file(
             let file_size = std::fs::metadata(&final_path)
                 .map(|m| m.len())
                 .unwrap_or(0);
-            info!("Export complete! File size: {} bytes", file_size);
-            
-            // Emit complete
-            let _ = app.emit("transfer-progress", TransferProgress {
-                status: "Complete".to_string(),
-                bytes_transferred: file_size,
-                total_bytes: file_size,
-                percent: 100.0,
-            });
-            
-            // Cleanup - shutdown router
-            info!("Shutting down router...");
+
+            emit_progress(&app, EVENT, "Complete", file_size, file_size, 100.0);
+
             router.shutdown().await?;
             info!("Receive complete!");
             
@@ -658,214 +570,4 @@ pub async fn receive_file(
             })
         }
     }
-}
-
-/// Start sending multiple files by path
-pub async fn start_send_multiple(
-    state: &SendmeState,
-    paths: Vec<String>,
-    app: AppHandle,
-) -> Result<SendResult> {
-    info!("start_send_multiple called with {} paths", paths.len());
-    
-    if paths.is_empty() {
-        return Err(anyhow!("No paths provided"));
-    }
-
-    let mut total_size = 0u64;
-    for path_str in &paths {
-        let path = PathBuf::from(path_str);
-        if path.exists() {
-            total_size += calculate_size(&path)?;
-        } else {
-            return Err(anyhow!("Path does not exist: {}", path.display()));
-        }
-    }
-
-    let first_file_name = get_name(&PathBuf::from(&paths[0]));
-    let display_name = if paths.len() == 1 { first_file_name } else { format!("{} items", paths.len()) };
-
-    // Emit initial progress
-    let _ = app.emit("transfer-progress", TransferProgress {
-        status: "Initializing...".to_string(),
-        bytes_transferred: 0,
-        total_bytes: total_size,
-        percent: 0.0,
-    });
-
-    let temp_dir = tempfile::Builder::new().prefix(".iron-send-").tempdir().context("Failed to create temp directory")?;
-    
-    let endpoint = Endpoint::builder().relay_mode(RelayMode::Default).bind().await.context("Failed to create endpoint")?;
-
-    let _ = app.emit("transfer-progress", TransferProgress {
-        status: "Setting up connection...".to_string(),
-        bytes_transferred: 0,
-        total_bytes: total_size,
-        percent: 10.0,
-    });
-
-    let store = FsStore::load(temp_dir.path()).await.context("Failed to load store")?;
-    let blobs = BlobsProtocol::new(&store, None);
-    let client = store.blobs();
-
-    let _ = app.emit("transfer-progress", TransferProgress {
-        status: "Importing files...".to_string(),
-        bytes_transferred: 0,
-        total_bytes: total_size,
-        percent: 20.0,
-    });
-
-    let mut collection = Collection::default();
-    
-    for path_str in paths {
-        let path = PathBuf::from(&path_str);
-        if path.is_file() {
-            let file_name = get_name(&path);
-            let progress = client.add_path(&path);
-            let add_outcome = progress.await.context("Failed to add file")?;
-            collection.push(file_name, add_outcome.hash);
-        } else {
-            let base_path = path.canonicalize().context("Failed to canonicalize path")?;
-            for entry in WalkDir::new(&path).into_iter().filter_map(|e| e.ok()) {
-                if entry.file_type().is_file() {
-                    let file_path = entry.path();
-                    let mut relative_path = file_path.strip_prefix(&base_path).unwrap_or(file_path).to_string_lossy().to_string();
-                    let folder_name = get_name(&path);
-                    relative_path = format!("{}/{}", folder_name, relative_path);
-                    let progress = client.add_path(file_path);
-                    let add_outcome = progress.await.context("Failed to add file")?;
-                    collection.push(relative_path, add_outcome.hash);
-                }
-            }
-        }
-    }
-
-    let collection_tag = collection.store(store.as_ref()).await.context("Failed to store collection")?;
-    let collection_hash = collection_tag.hash();
-
-    let _ = app.emit("transfer-progress", TransferProgress {
-        status: "Starting server...".to_string(),
-        bytes_transferred: total_size,
-        total_bytes: total_size,
-        percent: 60.0,
-    });
-
-    let router = Router::builder(endpoint).accept(iroh_blobs::ALPN, blobs).spawn();
-    router.endpoint().online().await;
-
-    let _ = app.emit("transfer-progress", TransferProgress {
-        status: "Generating ticket...".to_string(),
-        bytes_transferred: total_size,
-        total_bytes: total_size,
-        percent: 80.0,
-    });
-
-    let ticket = BlobTicket::new(router.endpoint().addr(), collection_hash, BlobFormat::HashSeq);
-    let ticket_string = ticket.to_string();
-
-    let _ = app.emit("transfer-progress", TransferProgress {
-        status: "Ready to send".to_string(),
-        bytes_transferred: total_size,
-        total_bytes: total_size,
-        percent: 100.0,
-    });
-
-    let mut active = state.active_send.lock().await;
-    *active = Some(SendSession { router, _temp_dir: temp_dir });
-
-    Ok(SendResult {
-        ticket: ticket_string,
-        file_name: display_name,
-        file_size: total_size,
-    })
-}
-
-/// Start sending multiple raw byte files (for Android content:// URIs)
-pub async fn start_send_multiple_bytes(
-    state: &SendmeState,
-    files: Vec<FileDataPayload>,
-    app: AppHandle,
-) -> Result<SendResult> {
-    info!("start_send_multiple_bytes called with {} files", files.len());
-    
-    if files.is_empty() {
-        return Err(anyhow!("No files provided"));
-    }
-
-    let total_size: u64 = files.iter().map(|f| f.data.len() as u64).sum();
-    let display_name = if files.len() == 1 { files[0].file_name.clone() } else { format!("{} items", files.len()) };
-
-    let _ = app.emit("transfer-progress", TransferProgress {
-        status: "Initializing...".to_string(),
-        bytes_transferred: 0,
-        total_bytes: total_size,
-        percent: 0.0,
-    });
-
-    let temp_dir = tempfile::Builder::new().prefix(".iron-send-").tempdir().context("Failed to create temp directory")?;
-    let endpoint = Endpoint::builder().relay_mode(RelayMode::Default).bind().await.context("Failed to create endpoint")?;
-
-    let _ = app.emit("transfer-progress", TransferProgress {
-        status: "Setting up connection...".to_string(),
-        bytes_transferred: 0,
-        total_bytes: total_size,
-        percent: 10.0,
-    });
-
-    let store = FsStore::load(temp_dir.path()).await.context("Failed to create blob store")?;
-    let blobs = BlobsProtocol::new(&store, None);
-    let client = store.blobs();
-
-    let _ = app.emit("transfer-progress", TransferProgress {
-        status: "Importing files...".to_string(),
-        bytes_transferred: 0,
-        total_bytes: total_size,
-        percent: 20.0,
-    });
-
-    let mut collection = Collection::default();
-    
-    for file in files {
-        let add_outcome = client.add_bytes(file.data).await.context("Failed to add bytes")?;
-        collection.push(file.file_name, add_outcome.hash);
-    }
-
-    let collection_tag = collection.store(store.as_ref()).await.context("Failed to store collection")?;
-    let collection_hash = collection_tag.hash();
-
-    let _ = app.emit("transfer-progress", TransferProgress {
-        status: "Starting server...".to_string(),
-        bytes_transferred: total_size,
-        total_bytes: total_size,
-        percent: 60.0,
-    });
-
-    let router = Router::builder(endpoint).accept(iroh_blobs::ALPN, blobs).spawn();
-    router.endpoint().online().await;
-
-    let _ = app.emit("transfer-progress", TransferProgress {
-        status: "Generating ticket...".to_string(),
-        bytes_transferred: total_size,
-        total_bytes: total_size,
-        percent: 80.0,
-    });
-
-    let ticket = BlobTicket::new(router.endpoint().addr(), collection_hash, BlobFormat::HashSeq);
-    let ticket_string = ticket.to_string();
-
-    let _ = app.emit("transfer-progress", TransferProgress {
-        status: "Ready to send".to_string(),
-        bytes_transferred: total_size,
-        total_bytes: total_size,
-        percent: 100.0,
-    });
-
-    let mut active = state.active_send.lock().await;
-    *active = Some(SendSession { router, _temp_dir: temp_dir });
-
-    Ok(SendResult {
-        ticket: ticket_string,
-        file_name: display_name,
-        file_size: total_size,
-    })
 }

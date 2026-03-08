@@ -78,43 +78,30 @@
 import { ref, onMounted, onUnmounted } from 'vue';
 import { invoke } from '@tauri-apps/api/core';
 import { listen, UnlistenFn } from '@tauri-apps/api/event';
-
-interface TransferProgress {
-  status: string;
-  bytes_transferred: number;
-  total_bytes: number;
-  percent: number;
-}
-
-interface ReceiveResult {
-  file_path: string;
-  file_name: string;
-  file_size: number;
-}
+import {
+  type TransferProgress,
+  type ReceiveResult,
+  formatFileSize,
+  defaultProgress,
+} from '../utils';
 
 const ticketInput = ref('');
 const isReceiving = ref(false);
 const result = ref<ReceiveResult | null>(null);
 const error = ref<string | null>(null);
-const progress = ref<TransferProgress>({
-  status: 'Connecting...',
-  bytes_transferred: 0,
-  total_bytes: 0,
-  percent: 0
-});
+const progress = ref<TransferProgress>(defaultProgress('Connecting...'));
 
 let unlisten: UnlistenFn | null = null;
 
 onMounted(async () => {
-  unlisten = await listen<TransferProgress>('transfer-progress', (event) => {
+  // Listen for receive-specific progress events (avoids collision with SendView)
+  unlisten = await listen<TransferProgress>('receive-progress', (event) => {
     progress.value = event.payload;
   });
 });
 
 onUnmounted(() => {
-  if (unlisten) {
-    unlisten();
-  }
+  unlisten?.();
 });
 
 async function startReceive() {
@@ -124,7 +111,6 @@ async function startReceive() {
   error.value = null;
 
   try {
-    // Get downloads directory
     const outputDir = await invoke<string>('get_downloads_dir');
 
     const receiveResult = await invoke<ReceiveResult>('receive_file', {
@@ -136,7 +122,6 @@ async function startReceive() {
     isReceiving.value = false;
   } catch (e) {
     console.error('Receive error:', e);
-    alert('Failed to receive file: ' + String(e));
     error.value = String(e);
     isReceiving.value = false;
   }
@@ -147,23 +132,7 @@ function resetState() {
   isReceiving.value = false;
   result.value = null;
   error.value = null;
-  progress.value = {
-    status: 'Connecting...',
-    bytes_transferred: 0,
-    total_bytes: 0,
-    percent: 0
-  };
-}
-
-function formatFileSize(bytes: number): string {
-  if (bytes === 0) return 'Unknown size';
-  const units = ['B', 'KB', 'MB', 'GB', 'TB'];
-  let i = 0;
-  while (bytes >= 1024 && i < units.length - 1) {
-    bytes /= 1024;
-    i++;
-  }
-  return `${bytes.toFixed(1)} ${units[i]}`;
+  progress.value = defaultProgress('Connecting...');
 }
 </script>
 
