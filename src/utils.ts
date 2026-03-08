@@ -39,6 +39,7 @@ export interface SelectedItem {
   size: number;
   isDir: boolean;
   needsName?: boolean;
+  loadingMetadata?: boolean;
   data?: Uint8Array;
 }
 
@@ -46,10 +47,11 @@ export interface SelectedItem {
 
 /**
  * Format a byte count into a human-readable string (e.g. "1.2 MB").
- * Returns `fallback` (default "Unknown size") when `bytes` is 0.
+ * Returns `fallback` (default "Unknown size") when `bytes` is null, undefined, or NaN.
+ * A value of 0 renders as "0.0 B".
  */
 export function formatFileSize(bytes: number, fallback = 'Unknown size'): string {
-  if (bytes === 0) return fallback;
+  if (bytes == null || Number.isNaN(bytes)) return fallback;
   const units = ['B', 'KB', 'MB', 'GB', 'TB'];
   let i = 0;
   while (bytes >= 1024 && i < units.length - 1) {

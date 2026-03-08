@@ -63,8 +63,8 @@
       </div>
 
       <!-- Send Button -->
-      <button v-if="!ticket && !isTransferring" class="btn btn-primary btn-large w-full mt-lg" @click="startSend">
-        <span>🚀</span> Start Sharing
+      <button v-if="!ticket && !isTransferring" class="btn btn-primary btn-large w-full mt-lg" @click="startSend" :disabled="!isReadyToSend">
+        <span>🚀</span> {{ isLoadingMetadata ? 'Loading...' : 'Start Sharing' }}
       </button>
     </div>
 
@@ -111,7 +111,7 @@ import { invoke } from '@tauri-apps/api/core';
 import { listen, UnlistenFn } from '@tauri-apps/api/event';
 import { open as openDialog } from '@tauri-apps/plugin-dialog';
 import { basename, join, appCacheDir } from '@tauri-apps/api/path';
-import { stat, mkdir, BaseDirectory, open as openFile } from '@tauri-apps/plugin-fs';
+import { stat, mkdir, remove, BaseDirectory, open as openFile } from '@tauri-apps/plugin-fs';
 import {
   type TransferProgress,
   type SendResult,
@@ -133,6 +133,22 @@ const progress = ref<TransferProgress>(defaultProgress());
 // Check if any files need naming
 const needsNaming = computed(() => selectedItems.value.some(item => item.needsName));
 const totalSize = computed(() => selectedItems.value.reduce((sum, item) => sum + item.size, 0));
+
+// Track whether metadata is still loading for any item
+const isLoadingMetadata = computed(() => selectedItems.value.some(item => item.loadingMetadata));
+
+// CTA is only enabled when all metadata has settled and no items still need naming
+const isReadyToSend = computed(() => {
+  if (selectedItems.value.length === 0) return false;
+  return selectedItems.value.every(item => {
+    if (item.loadingMetadata) return false;
+    if (item.needsName) {
+      // For items requiring manual naming, ensure name is non-empty and path-safe
+      return item.name.trim().length > 0 && !/[/\\:*?"<>|]/.test(item.name.trim());
+    }
+    return true;
+  });
+});
 
 let unlisten: UnlistenFn | null = null;
 
@@ -268,6 +284,7 @@ async function processSelectedPaths(paths: string[]) {
       size: 0,
       isDir: false,
       needsName: false,
+      loadingMetadata: true,
     };
   });
   
@@ -289,6 +306,8 @@ async function processSelectedPaths(paths: string[]) {
     }).catch(e => {
       console.error('Error fetching file info:', e);
       item.needsName = true;
+    }).finally(() => {
+      item.loadingMetadata = false;
     });
   }
 }
@@ -314,19 +333,30 @@ async function cacheContentUri(contentUri: string, fileName: string): Promise<st
   const srcFile = await openFile(contentUri, { read: true });
   const dstFile = await openFile(relativeFilePath, { write: true, create: true, baseDir: BaseDirectory.AppCache });
 
-  const buf = new Uint8Array(CHUNK_SIZE);
-  let totalWritten = 0;
-  while (true) {
-    const bytesRead = await srcFile.read(buf);
-    if (bytesRead === null) break;
-    const chunk = bytesRead < CHUNK_SIZE ? buf.subarray(0, bytesRead) : buf;
-    await dstFile.write(chunk);
-    totalWritten += bytesRead;
-    progress.value.status = `Caching... ${(totalWritten / (1024 * 1024)).toFixed(0)} MB`;
+  let errorOccurred = false;
+  try {
+    const buf = new Uint8Array(CHUNK_SIZE);
+    let totalWritten = 0;
+    while (true) {
+      const bytesRead = await srcFile.read(buf);
+      if (bytesRead === null) break;
+      const chunk = bytesRead < CHUNK_SIZE ? buf.subarray(0, bytesRead) : buf;
+      await dstFile.write(chunk);
+      totalWritten += bytesRead;
+      progress.value.status = `Caching... ${(totalWritten / (1024 * 1024)).toFixed(0)} MB`;
+    }
+  } catch (e) {
+    errorOccurred = true;
+    throw e;
+  } finally {
+    // Always close file handles
+    try { await srcFile.close(); } catch { /* ignore close errors */ }
+    try { await dstFile.close(); } catch { /* ignore close errors */ }
+    // Remove partial cache file if an error occurred
+    if (errorOccurred) {
+      try { await remove(relativeFilePath, { baseDir: BaseDirectory.AppCache }); } catch { /* best effort */ }
+    }
   }
-
-  await srcFile.close();
-  await dstFile.close();
 
   return await join(cacheDir, relativeFilePath);
 }
@@ -336,6 +366,9 @@ async function startSend() {
 
   isTransferring.value = true;
   error.value = null;
+
+  // Track cached paths for cleanup after send
+  const cachedPaths: string[] = [];
 
   try {
     let result: SendResult;
@@ -348,6 +381,7 @@ async function startSend() {
       // Stream content:// URI to local cache first
       progress.value.status = 'Caching file to disk...';
       const cachedPath = await cacheContentUri(firstItem.path, firstItem.name);
+      cachedPaths.push(cachedPath);
       result = await invoke<SendResult>('start_send', { path: cachedPath });
     } else if (selectedItems.value.length === 1) {
       // Single regular file
@@ -358,11 +392,12 @@ async function startSend() {
       
       if (hasContentUri) {
         progress.value.status = 'Caching files...';
-        const paths = [];
+        const paths: string[] = [];
         for (const item of selectedItems.value) {
            if (item.path.startsWith('content://')) {
              progress.value.status = 'Caching ' + item.name;
              const cachedPath = await cacheContentUri(item.path, item.name);
+             cachedPaths.push(cachedPath);
              paths.push(cachedPath);
            } else {
              paths.push(item.path);
@@ -383,6 +418,15 @@ async function startSend() {
     console.error('Send error:', e);
     error.value = String(e);
     isTransferring.value = false;
+  } finally {
+    // Clean up cached content:// files (best effort)
+    for (const cached of cachedPaths) {
+      try {
+        await remove(cached);
+      } catch {
+        console.warn('Failed to clean cached file:', cached);
+      }
+    }
   }
 }
 

@@ -15,6 +15,7 @@ use iroh_blobs::{
     BlobsProtocol,
 };
 use serde::{Deserialize, Serialize};
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use tauri::{AppHandle, Emitter};
 use tokio::sync::Mutex;
@@ -116,64 +117,6 @@ fn emit_progress(app: &AppHandle, event_name: &str, status: &str, bytes: u64, to
     });
 }
 
-/// Shared boilerplate: create temp dir → endpoint → store → blobs protocol → import collection → spawn router → generate ticket.
-/// Returns the running `SendSession` and the ticket string.
-async fn create_send_session(
-    app: &AppHandle,
-    event_name: &str,
-    collection: Collection,
-    total_size: u64,
-) -> Result<(SendSession, String)> {
-    // Create temporary directory for blob storage
-    let temp_dir = tempfile::Builder::new()
-        .prefix(".iron-send-")
-        .tempdir()
-        .context("Failed to create temp directory")?;
-
-    // Initialize iroh endpoint
-    let endpoint = Endpoint::builder()
-        .relay_mode(RelayMode::Default)
-        .bind()
-        .await
-        .context("Failed to create iroh endpoint")?;
-
-    emit_progress(app, event_name, "Setting up connection...", 0, total_size, 10.0);
-
-    // Create blob store using FsStore + BlobsProtocol
-    let store = FsStore::load(temp_dir.path())
-        .await
-        .context("Failed to create blob store")?;
-    let blobs = BlobsProtocol::new(&store, None);
-
-    // Store the collection to get its root hash
-    let collection_tag = collection.store(store.as_ref())
-        .await
-        .context("Failed to store collection")?;
-    let collection_hash = collection_tag.hash();
-
-    emit_progress(app, event_name, "Starting server...", total_size, total_size, 60.0);
-
-    // Spawn router and wait for relay connection
-    let router = Router::builder(endpoint)
-        .accept(iroh_blobs::ALPN, blobs)
-        .spawn();
-    router.endpoint().online().await;
-
-    emit_progress(app, event_name, "Generating ticket...", total_size, total_size, 80.0);
-
-    // Generate ticket (HashSeq format for collections)
-    let ticket = BlobTicket::new(router.endpoint().addr(), collection_hash, BlobFormat::HashSeq);
-    let ticket_string = ticket.to_string();
-
-    emit_progress(app, event_name, "Ready to send", total_size, total_size, 100.0);
-
-    let session = SendSession {
-        router,
-        _temp_dir: temp_dir,
-    };
-
-    Ok((session, ticket_string))
-}
 
 // ─── Public API ──────────────────────────────────────────────────
 
@@ -224,12 +167,14 @@ pub async fn start_send(
 
     emit_progress(&app, EVENT, "Importing files...", 0, file_size, 20.0);
 
-    // Build collection
+    // Build collection (with duplicate-key detection)
     let mut collection = Collection::default();
+    let mut seen_keys = HashSet::new();
     
     if path.is_file() {
         info!("Importing single file: {}", file_name);
         let add_outcome = client.add_path(&path).await.context("Failed to add file")?;
+        seen_keys.insert(file_name.clone());
         collection.push(file_name.clone(), add_outcome.hash);
     } else {
         info!("Importing directory: {}", path.display());
@@ -243,6 +188,10 @@ pub async fn start_send(
                     .unwrap_or(file_path)
                     .to_string_lossy()
                     .to_string();
+                
+                if !seen_keys.insert(relative_path.clone()) {
+                    return Err(anyhow!("Duplicate entry in collection: {}", relative_path));
+                }
                 
                 info!("Importing: {} -> {}", file_path.display(), relative_path);
                 let add_outcome = client.add_path(file_path).await.context("Failed to add file")?;
@@ -349,13 +298,17 @@ pub async fn start_send_multiple(
 
     emit_progress(&app, EVENT, "Importing files...", 0, total_size, 20.0);
 
-    // Build collection from all paths
+    // Build collection from all paths (with duplicate-key detection)
     let mut collection = Collection::default();
+    let mut seen_keys = HashSet::new();
     
     for path_str in paths {
         let path = PathBuf::from(&path_str);
         if path.is_file() {
             let file_name = get_name(&path);
+            if !seen_keys.insert(file_name.clone()) {
+                return Err(anyhow!("Duplicate file name in selection: {}", file_name));
+            }
             let add_outcome = client.add_path(&path).await.context("Failed to add file")?;
             collection.push(file_name, add_outcome.hash);
         } else {
@@ -370,6 +323,9 @@ pub async fn start_send_multiple(
                         .to_string_lossy()
                         .to_string();
                     let relative_path = format!("{}/{}", folder_name, relative);
+                    if !seen_keys.insert(relative_path.clone()) {
+                        return Err(anyhow!("Duplicate entry in collection: {}", relative_path));
+                    }
                     let add_outcome = client.add_path(file_path).await.context("Failed to add file")?;
                     collection.push(relative_path, add_outcome.hash);
                 }
