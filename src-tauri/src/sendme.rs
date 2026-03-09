@@ -437,10 +437,6 @@ pub async fn receive_file(
 
     emit_progress(&app, EVENT, "Downloading...", 0, 0, 30.0);
 
-    // Register the full node address (relay URL, direct addrs) so the endpoint
-    // can actually reach the sender — without this, only NodeId is known.
-    endpoint.add_node_addr(node_addr.clone()).ok();
-
     // Start the download using Downloader
     let downloader = Downloader::new(&store, router.endpoint());
     let request = match format {
