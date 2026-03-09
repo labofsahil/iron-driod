@@ -16,10 +16,10 @@ use iroh_blobs::{
 };
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use tauri::{AppHandle, Emitter};
 use tokio::sync::Mutex;
-use tracing::{info, error};
+use tracing::{info, warn, error};
 use walkdir::WalkDir;
 
 // ─── Public Types ────────────────────────────────────────────────
@@ -117,6 +117,51 @@ fn emit_progress(app: &AppHandle, event_name: &str, status: &str, bytes: u64, to
     });
 }
 
+/// Shut down any existing active session before replacing it.
+async fn replace_active_session(state: &SendmeState, new_session: SendSession) {
+    let mut active = state.active_send.lock().await;
+    if let Some(prev) = active.take() {
+        warn!("Shutting down previous send session before starting new one");
+        if let Err(e) = prev.router.shutdown().await {
+            warn!("Error shutting down previous session: {}", e);
+        }
+    }
+    *active = Some(new_session);
+}
+
+/// Validate that an entry name from a remote collection is safe to write.
+/// Rejects absolute paths, parent-directory traversal (`..`), and names that
+/// would escape the intended output directory.
+fn sanitize_entry_name(name: &str, output_path: &Path) -> Result<PathBuf> {
+    let entry_path = Path::new(name);
+
+    // Reject absolute paths
+    if entry_path.is_absolute() {
+        return Err(anyhow!("Rejecting absolute entry name: {}", name));
+    }
+
+    // Reject any component that is `..`
+    for component in entry_path.components() {
+        if matches!(component, Component::ParentDir) {
+            return Err(anyhow!("Rejecting path traversal in entry name: {}", name));
+        }
+    }
+
+    let full_path = output_path.join(entry_path);
+
+    // Canonicalize-like check: the joined path must start with output_path.
+    // We can't canonicalize because the file doesn't exist yet, so use
+    // the component-based check above as the primary guard.
+    // As an additional belt-and-suspenders check, verify the prefix.
+    let normalized = full_path.to_string_lossy();
+    let output_prefix = output_path.to_string_lossy();
+    if !normalized.starts_with(output_prefix.as_ref()) {
+        return Err(anyhow!("Entry name escapes output directory: {}", name));
+    }
+
+    Ok(full_path)
+}
+
 
 // ─── Public API ──────────────────────────────────────────────────
 
@@ -179,15 +224,17 @@ pub async fn start_send(
     } else {
         info!("Importing directory: {}", path.display());
         let base_path = path.canonicalize().context("Failed to canonicalize path")?;
+        let folder_name = get_name(&base_path);
         
         for entry in WalkDir::new(&path).into_iter().filter_map(|e| e.ok()) {
             if entry.file_type().is_file() {
                 let file_path = entry.path();
-                let relative_path = file_path
+                let relative = file_path
                     .strip_prefix(&base_path)
                     .unwrap_or(file_path)
                     .to_string_lossy()
                     .to_string();
+                let relative_path = format!("{}/{}", folder_name, relative);
                 
                 if !seen_keys.insert(relative_path.clone()) {
                     return Err(anyhow!("Duplicate entry in collection: {}", relative_path));
@@ -234,12 +281,11 @@ pub async fn start_send(
 
     emit_progress(&app, EVENT, "Ready to send", file_size, file_size, 100.0);
 
-    // Store active session
-    let mut active = state.active_send.lock().await;
-    *active = Some(SendSession {
+    // Store active session (shutting down any previous one first)
+    replace_active_session(state, SendSession {
         router,
         _temp_dir: temp_dir,
-    });
+    }).await;
 
     info!("Send session ready!");
     Ok(SendResult {
@@ -352,8 +398,8 @@ pub async fn start_send_multiple(
 
     emit_progress(&app, EVENT, "Ready to send", total_size, total_size, 100.0);
 
-    let mut active = state.active_send.lock().await;
-    *active = Some(SendSession { router, _temp_dir: temp_dir });
+    // Store active session (shutting down any previous one first)
+    replace_active_session(state, SendSession { router, _temp_dir: temp_dir }).await;
 
     Ok(SendResult {
         ticket: ticket_string,
@@ -462,7 +508,10 @@ pub async fn receive_file(
             let mut file_names = Vec::new();
             for (name, blob_hash) in collection.iter() {
                 info!("Exporting: {} (hash: {})", name, blob_hash);
-                let file_path = output_path.join(name);
+                
+                // Sanitize the entry name to prevent path traversal attacks
+                let file_path = sanitize_entry_name(name, &output_path)
+                    .with_context(|| format!("Unsafe entry name from sender: {}", name))?;
                 
                 if let Some(parent) = file_path.parent() {
                     std::fs::create_dir_all(parent).ok();
