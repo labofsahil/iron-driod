@@ -259,6 +259,7 @@ p {
   background: var(--bg-tertiary);
   border-radius: var(--radius-full);
   overflow: hidden;
+  position: relative;
 }
 
 .progress-fill {
@@ -267,6 +268,23 @@ p {
   border-radius: var(--radius-full);
   transition: width var(--transition-normal);
   box-shadow: 0 0 10px var(--accent-glow);
+}
+
+.progress-bar.indeterminate .progress-fill {
+  width: 30% !important;
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  animation: indeterminate-sweep 1.5s infinite linear;
+}
+
+@keyframes indeterminate-sweep {
+  0% {
+    left: -30%;
+  }
+  100% {
+    left: 100%;
+  }
 }
 
 .progress-text {

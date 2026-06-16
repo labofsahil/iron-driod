@@ -4,9 +4,10 @@
 //! adapted for use within a Tauri mobile application.
 
 use anyhow::{anyhow, Context, Result};
+use futures_lite::stream::StreamExt;
 use iroh::{endpoint::presets, protocol::Router, Endpoint, RelayMode};
 use iroh_blobs::{
-    api::downloader::Downloader,
+    api::downloader::{Downloader, DownloadProgressItem},
     format::collection::Collection,
     protocol::GetRequest,
     store::fs::FsStore,
@@ -490,9 +491,29 @@ pub async fn receive_file(
         BlobFormat::HashSeq => GetRequest::all(hash),
     };
     
-    downloader.download(request, [node_addr.id])
+    let download_progress = downloader.download(request, [node_addr.id]);
+    let mut stream = download_progress
+        .stream()
         .await
-        .context("Download failed")?;
+        .context("Failed to start download stream")?;
+
+    while let Some(item) = stream.next().await {
+        match item {
+            DownloadProgressItem::Progress(bytes) => {
+                emit_progress(&app, EVENT, "Downloading...", bytes, 0, 30.0);
+            }
+            DownloadProgressItem::PartComplete { .. } => {
+                info!("Downloaded part successfully");
+            }
+            DownloadProgressItem::Error(e) => {
+                warn!("Error during download part: {:?}", e);
+            }
+            DownloadProgressItem::DownloadError => {
+                return Err(anyhow!("Download failed"));
+            }
+            _ => {}
+        }
+    }
     info!("Download complete!");
 
     // Export files based on format

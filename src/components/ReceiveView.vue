@@ -25,12 +25,27 @@
         <h2>Receiving File...</h2>
 
         <div class="progress-container w-full">
-          <div class="progress-bar">
-            <div class="progress-fill" :style="{ width: progress.percent + '%' }"></div>
+          <div class="progress-bar" :class="{ indeterminate: progress.total_bytes === 0 }">
+            <div class="progress-fill" :style="{ width: (progress.total_bytes > 0 ? progress.percent : 100) + '%' }"></div>
           </div>
-          <div class="progress-text">
-            <span>{{ progress.status }}</span>
-            <span>{{ Math.round(progress.percent) }}%</span>
+          
+          <div class="progress-details mt-md w-full">
+            <div class="detail-row">
+              <span class="detail-label">Status</span>
+              <span class="detail-value">{{ progress.status }}</span>
+            </div>
+            <div class="detail-row">
+              <span class="detail-label">Received</span>
+              <span class="detail-value font-mono">{{ formatFileSize(progress.bytes_transferred) }}</span>
+            </div>
+            <div v-if="progress.total_bytes > 0" class="detail-row">
+              <span class="detail-label">Total Size</span>
+              <span class="detail-value font-mono">{{ formatFileSize(progress.total_bytes) }}</span>
+            </div>
+            <div class="detail-row">
+              <span class="detail-label">Speed</span>
+              <span class="detail-value speed-val">{{ currentSpeed }}</span>
+            </div>
           </div>
         </div>
       </div>
@@ -91,11 +106,34 @@ const result = ref<ReceiveResult | null>(null);
 const error = ref<string | null>(null);
 const progress = ref<TransferProgress>(defaultProgress('Connecting...'));
 
+const startTime = ref<number | null>(null);
+const lastUpdateTime = ref<number | null>(null);
+const lastBytesTransferred = ref<number>(0);
+const currentSpeed = ref<string>('0 B/s');
+
 let unlisten: UnlistenFn | null = null;
 
 onMounted(async () => {
   // Listen for receive-specific progress events (avoids collision with SendView)
   unlisten = await listen<TransferProgress>('receive-progress', (event) => {
+    const now = Date.now();
+    const bytes = event.payload.bytes_transferred;
+    
+    if (startTime.value === null) {
+      startTime.value = now;
+      lastUpdateTime.value = now;
+      lastBytesTransferred.value = bytes;
+    } else {
+      const timeDelta = now - (lastUpdateTime.value || now);
+      if (timeDelta >= 500) {
+        const bytesDelta = bytes - lastBytesTransferred.value;
+        const speedBytesPerSec = (bytesDelta / timeDelta) * 1000;
+        currentSpeed.value = `${formatFileSize(speedBytesPerSec)}/s`;
+        lastUpdateTime.value = now;
+        lastBytesTransferred.value = bytes;
+      }
+    }
+
     progress.value = event.payload;
   });
 });
@@ -109,6 +147,10 @@ async function startReceive() {
 
   isReceiving.value = true;
   error.value = null;
+  startTime.value = null;
+  lastUpdateTime.value = null;
+  lastBytesTransferred.value = 0;
+  currentSpeed.value = '0 B/s';
 
   try {
     const outputDir = await invoke<string>('get_downloads_dir');
@@ -133,6 +175,10 @@ function resetState() {
   result.value = null;
   error.value = null;
   progress.value = defaultProgress('Connecting...');
+  startTime.value = null;
+  lastUpdateTime.value = null;
+  lastBytesTransferred.value = 0;
+  currentSpeed.value = '0 B/s';
 }
 </script>
 
@@ -192,5 +238,41 @@ function resetState() {
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
+}
+
+.progress-details {
+  display: flex;
+  flex-direction: column;
+  gap: var(--spacing-sm);
+  background: var(--bg-tertiary);
+  border-radius: var(--radius-md);
+  padding: var(--spacing-md);
+  margin-top: var(--spacing-md);
+  border: 1px solid var(--border-color);
+}
+
+.detail-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  font-size: 0.85rem;
+}
+
+.detail-label {
+  color: var(--text-muted);
+}
+
+.detail-value {
+  color: var(--text-primary);
+  font-weight: 500;
+}
+
+.speed-val {
+  color: var(--success);
+  font-weight: 600;
+}
+
+.font-mono {
+  font-family: var(--font-mono);
 }
 </style>
