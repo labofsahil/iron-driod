@@ -1,4 +1,10 @@
 version: 2
+
+multi-ecosystem-groups:
+  tauri-app-updates:
+    schedule:
+      interval: "weekly"
+
 updates:
   - package-ecosystem: "github-actions"
     directory: "/"
@@ -11,18 +17,12 @@ updates:
 
   - package-ecosystem: "cargo"
     directory: "/src-tauri"
-    schedule:
-      interval: "weekly"
-    groups:
-      cargo-updates:
-        patterns:
-          - "*"
+    multi-ecosystem-group: "tauri-app-updates"
+    patterns:
+      - "*"
 
   - package-ecosystem: "bun"
     directory: "/"
-    schedule:
-      interval: "weekly"
-    groups:
-      bun-updates:
-        patterns:
-          - "*"
+    multi-ecosystem-group: "tauri-app-updates"
+    patterns:
+      - "*"
