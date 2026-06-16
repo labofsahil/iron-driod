@@ -4,7 +4,7 @@
 //! adapted for use within a Tauri mobile application.
 
 use anyhow::{anyhow, Context, Result};
-use iroh::{protocol::Router, Endpoint, RelayMode};
+use iroh::{endpoint::presets, protocol::Router, Endpoint, RelayMode};
 use iroh_blobs::{
     api::downloader::Downloader,
     format::collection::Collection,
@@ -262,7 +262,7 @@ pub async fn start_send(
     emit_progress(&app, EVENT, "Starting server...", file_size, file_size, 60.0);
 
     let blobs = BlobsProtocol::new(&store, None);
-    let endpoint = Endpoint::builder()
+    let endpoint = Endpoint::builder(presets::N0)
         .relay_mode(RelayMode::Default)
         .bind()
         .await
@@ -328,7 +328,7 @@ pub async fn start_send_multiple(
         .prefix(".iron-send-")
         .tempdir()
         .context("Failed to create temp directory")?;
-    let endpoint = Endpoint::builder()
+    let endpoint = Endpoint::builder(presets::N0)
         .relay_mode(RelayMode::Default)
         .bind()
         .await
@@ -451,7 +451,7 @@ pub async fn receive_file(
         .context("Failed to create temp directory")?;
 
     // Initialize iroh endpoint for client
-    let endpoint = Endpoint::builder()
+    let endpoint = Endpoint::builder(presets::N0)
         .relay_mode(RelayMode::Default)
         .bind()
         .await
