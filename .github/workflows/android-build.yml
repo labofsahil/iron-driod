@@ -44,9 +44,6 @@ jobs:
       - name: Install frontend dependencies
         run: bun install
 
-      - name: Install Tauri CLI
-        run: cargo install tauri-cli --version "^2"
-
       - name: Setup Android NDK
         uses: nttld/setup-ndk@v1
         id: setup-ndk
@@ -59,7 +56,7 @@ jobs:
           echo "ANDROID_NDK_HOME=${{ steps.setup-ndk.outputs.ndk-path }}" >> $GITHUB_ENV
 
       - name: Build Android APK (Debug)
-        run: cargo tauri android build --debug
+        run: bun run tauri android build --debug
 
       - name: Upload Debug APK
         uses: actions/upload-artifact@v7
@@ -70,7 +67,7 @@ jobs:
 
   build-android-release:
     runs-on: blacksmith-8vcpu-ubuntu-2404
-    if: github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master') || contains(github.event.head_commit.message, 'deploy')
+    if: github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master' || contains(github.event.head_commit.message, 'deploy'))
     
     steps:
       - name: Checkout repository
@@ -98,9 +95,6 @@ jobs:
       - name: Install frontend dependencies
         run: bun install
 
-      - name: Install Tauri CLI
-        run: cargo install tauri-cli --version "^2"
-
       - name: Setup Android NDK
         uses: nttld/setup-ndk@v1
         id: setup-ndk
@@ -121,7 +115,7 @@ jobs:
           echo "storeFile=$RUNNER_TEMP/keystore.jks" >> keystore.properties
 
       - name: Build Android APK (Release)
-        run: cargo tauri android build
+        run: bun run tauri android build
         env:
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
